@@ -4,105 +4,124 @@
 
 This repository targets radar pulse deinterleaving under an unknown number of emitters.
 
-The long-term goal is not fixed-class sequence labeling. The target pipeline is:
+The long-term target pipeline is:
 
-1. Load PDW pulse trains.
-2. Split pulse trains into pulse-level windows.
-3. Generate pulse-level contextual embeddings.
-4. Cluster embeddings using non-parametric clustering.
+1. Load TSRD pulse trains.
+2. Split pulse trains into fixed-length pulse windows.
+3. Extract pulse-level contextual embeddings using TCAN or Transformer encoder.
+4. Cluster embeddings using DBSCAN, HDBSCAN, or hierarchical clustering.
 5. Estimate emitter count.
-6. Evaluate with clustering metrics.
+6. Evaluate clustering with V-measure, ARI, AMI, Homogeneity, Completeness, and source-count error.
 
 ## Current branch
 
-feat/tsrd-window-clustering-baseline
+feat/tcan-embedding-extraction
 
 ## Current objective
 
-Implement Phase 1B: TSRD windowing and raw-feature clustering baseline.
+Implement Phase 2A: TCAN encoder embedding extraction and embedding clustering scaffold.
 
 Phase 1A TSRD loader has already been implemented.
 
-Do not implement TCAN embedding yet.
-Do not implement triplet loss yet.
-Do not implement supervised contrastive loss yet.
-Do not modify the TCAN model.
-Do not train deep models in this branch.
+Phase 1B TSRD windowing and raw-feature clustering baseline has already been implemented.
+
+This branch should not implement triplet loss yet.
+
+This branch should not implement supervised contrastive loss yet.
+
+This branch should not implement post-processing such as cluster merging or splitting.
 
 ## Main task
 
-Add a basic unknown-source-count clustering evaluation pipeline using raw PDW-derived features.
+Add a TCAN encoder mode that outputs pulse-level embeddings instead of fixed-class logits.
 
-The pipeline should be:
+The goal is to connect:
 
-TSRD pulse train
--> sort by TOA
--> compute DTOA
--> build 4d or 5d features
--> split into fixed-length pulse windows
--> normalize features
--> cluster each window
--> evaluate clustering against true labels
+TSRD window
+-> feature construction
+-> TCAN encoder
+-> pulse embeddings
+-> clustering baseline
+-> clustering metrics
 
-## Required files
+## Required implementation
 
 Create or update:
 
+- src/model_tcan.py
+- src/embedding_extractor.py
+- run_tsrd_embedding_clustering.py
+- README.md
+
+Reuse existing:
+
+- src/tsrd_loader.py
 - src/tsrd_window_dataset.py
 - src/clustering_baselines.py
 - src/clustering_metrics.py
-- run_tsrd_clustering_baseline.py
-- README.md
 
-## Windowing
+## Embedding output
 
-Support pulse-count windows:
+The TCAN encoder should accept:
 
-- window_size
-- stride
-- max_windows
+X: [B, T, D]
 
-Default:
+and return:
 
-- window_size = 1024
-- stride = 1024
-- max_windows = 10
+embeddings: [B, T, E]
 
-Each window should return:
+where:
 
-X_window: [window_size, feature_dim]
-y_window: [window_size]
-metadata:
-  source file
-  start index
-  end index
-  true source count
+- B is batch size
+- T is pulse-window length
+- D is input feature dimension
+- E is embedding dimension
 
-## Feature sets
+The embedding dimension should be configurable, default:
 
-Support:
+--embedding-dim 64
 
-4d:
-[DTOA, PW, RF, AOA]
+## Important design
 
-5d:
-[DTOA, PW, RF, AOA, PA]
+Do not remove the existing TCAN classification pipeline.
 
-Normalize features per window using StandardScaler or RobustScaler.
+Add encoder functionality without breaking existing code.
 
-## Clustering methods
+Possible implementation options:
 
-Implement:
+1. Add a `return_embeddings` flag to TCAN forward.
+2. Split TCAN into encoder and classifier head.
+3. Add a wrapper class TCANEncoder.
 
-1. DBSCAN
-2. AgglomerativeClustering with oracle true source count for sanity check
-3. Optional HDBSCAN if the package is installed
+Choose the cleanest option while preserving backward compatibility.
 
-If hdbscan is not installed, print a clear message and continue.
+## Clustering script
+
+Create:
+
+run_tsrd_embedding_clustering.py
+
+Arguments:
+
+--tsrd-path
+--feature-set 4d/5d
+--window-size
+--stride
+--max-windows
+--embedding-dim
+--method dbscan/hdbscan/agglomerative_oracle
+--eps
+--min-samples
+--min-cluster-size
+--checkpoint optional
+
+For this branch, if no checkpoint is provided, allow random initialized embeddings for pipeline testing, but clearly print a warning.
+
+If a checkpoint is provided, load model weights if compatible.
 
 ## Metrics
 
-For each window, compute:
+Use existing clustering metrics:
 
 - homogeneity
 - completeness
@@ -113,53 +132,48 @@ For each window, compute:
 - estimated_source_count
 - source_count_error
 - abs_source_count_error
-- noise_ratio if cluster label -1 exists
-
-Aggregate metrics across windows and print mean values.
-
-## Command-line script
-
-Create:
-
-run_tsrd_clustering_baseline.py
-
-Arguments:
-
---tsrd-path
---feature-set 4d/5d
---window-size
---stride
---max-windows
---method dbscan/hdbscan/agglomerative_oracle
---eps
---min-samples
---min-cluster-size
-
-Example:
-
-python run_tsrd_clustering_baseline.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 5 --method dbscan
+- noise_ratio
 
 ## Constraints
 
-Do not upload data files.
-Do not commit outputs.
-Do not implement neural embedding in this branch.
 Do not implement triplet loss in this branch.
-Do not implement source-count correction or post-processing yet.
+
+Do not implement supervised contrastive loss in this branch.
+
+Do not implement HDBSCAN-specific tuning in this branch.
+
+Do not implement cluster merging/splitting in this branch.
+
+Do not train a deep embedding model in this branch.
+
+Do not commit datasets or outputs.
 
 ## Verification
 
 The following should run:
 
-python run_tsrd_clustering_baseline.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --method dbscan
+python run_tsrd_embedding_clustering.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --method dbscan
 
-python run_tsrd_clustering_baseline.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --method agglomerative_oracle
+python run_tsrd_embedding_clustering.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --method agglomerative_oracle
+
+Expected result:
+
+- The script loads TSRD windows.
+- The TCAN encoder outputs embeddings with shape [T, E].
+- Clustering runs on embeddings.
+- Clustering metrics are printed.
+
+It is acceptable if metrics are poor when the encoder is randomly initialized. The goal of this branch is pipeline construction, not final performance.
+
+## Git
+
+Do not commit automatically unless asked.
 
 After implementation, report:
 
-1. Files modified
-2. How windows are constructed
-3. How source count is estimated
-4. Which clustering metrics are computed
-5. Baseline results on the test file
-6. Limitations
+1. files modified
+2. how TCAN encoder embeddings are produced
+3. embedding shape
+4. how clustering uses embeddings
+5. smoke test results
+6. next step toward triplet loss or supervised contrastive loss

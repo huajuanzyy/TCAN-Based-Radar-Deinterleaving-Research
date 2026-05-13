@@ -90,7 +90,7 @@ class SelfAttentionBlock(nn.Module):
 
 
 class TCAN(nn.Module):
-    """TCN plus self-attention model producing one class logit per pulse."""
+    """TCN plus self-attention model for pulse logits or embeddings."""
 
     def __init__(
         self,
@@ -100,6 +100,7 @@ class TCAN(nn.Module):
         kernel_size=3,
         dropout=0.1,
         attention_heads=4,
+        embedding_dim=64,
     ):
         super().__init__()
         layers = []
@@ -119,12 +120,24 @@ class TCAN(nn.Module):
         self.tcn = nn.Sequential(*layers)
         hidden_dim = hidden_channels[-1]
         self.attention = SelfAttentionBlock(hidden_dim, attention_heads, dropout)
-        self.classifier = nn.Linear(hidden_dim, num_classes)
+        self.embedding_projection = (
+            nn.Identity()
+            if embedding_dim == hidden_dim
+            else nn.Linear(hidden_dim, embedding_dim)
+        )
+        self.classifier = nn.Linear(embedding_dim, num_classes)
 
-    def forward(self, x):
-        """Map [B, T, D] input features to [B, T, C] logits."""
+    def encode(self, x):
+        """Map [B, T, D] input features to [B, T, E] pulse embeddings."""
         x = x.transpose(1, 2)
         x = self.tcn(x)
         x = x.transpose(1, 2)
         x = self.attention(x)
-        return self.classifier(x)
+        return self.embedding_projection(x)
+
+    def forward(self, x, return_embeddings=False):
+        """Map [B, T, D] to logits [B, T, C] or embeddings [B, T, E]."""
+        embeddings = self.encode(x)
+        if return_embeddings:
+            return embeddings
+        return self.classifier(embeddings)

@@ -789,3 +789,46 @@ python run_tsrd_clustering_baseline.py --tsrd-path E:\Datasets\TSRD\scan\train_s
 ```
 
 如果当前环境中没有安装 HDBSCAN，可以先跳过该方法；DBSCAN 与 `agglomerative_oracle` 已足够验证 Phase 1B 的窗口与评价链路。
+
+## Phase 2A: TCAN Encoder Embedding Extraction
+
+Phase 2A 开始把项目从 fixed-class classifier 逐步转向 pulse-level embeddings。原来的 TCAN 分类路径仍然保留：`model(X)` 继续输出每个 pulse 的分类 logits。新增的 encoder 路径可以输出每个 pulse 的上下文 embedding：
+
+```text
+输入 X: [B, T, D]
+输出 embeddings: [B, T, E]
+```
+
+其中 `B` 是 batch size，`T` 是 window 内 pulse 数量，`D` 是输入 feature 维度，`E` 是 embedding 维度，默认 `E=64`，可通过 `--embedding-dim` 设置。对单个 window 做聚类时，脚本会使用：
+
+```text
+embeddings: [T, E]
+```
+
+Phase 1B 的 raw-feature clustering 是直接对 `[DTOA, PW, RF, AOA]` 或 `[DTOA, PW, RF, AOA, PA]` 聚类。Phase 2A 则先把这些 window features 输入 TCAN encoder，得到 pulse-level embeddings，再对 embeddings 执行 DBSCAN、HDBSCAN 或 `agglomerative_oracle`，并复用已有聚类指标。
+
+当前阶段不训练 embedding。如果没有提供 checkpoint，脚本会使用随机初始化的 TCAN encoder，并打印警告：
+
+```text
+Warning: using randomly initialized TCAN encoder. Metrics are for pipeline testing only.
+```
+
+因此当前指标只用于验证链路是否跑通，不代表最终分选性能。下一阶段会在这个 scaffold 上加入 triplet loss 或 supervised contrastive loss，让 embeddings 具备“同源更近、异源更远”的度量结构。
+
+运行随机初始化 TCAN embedding + DBSCAN：
+
+```powershell
+python run_tsrd_embedding_clustering.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --method dbscan
+```
+
+运行随机初始化 TCAN embedding + oracle source-count 层次聚类：
+
+```powershell
+python run_tsrd_embedding_clustering.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --method agglomerative_oracle
+```
+
+如果有兼容 checkpoint，可以额外传入：
+
+```powershell
+--checkpoint path\to\checkpoint.pt
+```
