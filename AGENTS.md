@@ -2,178 +2,164 @@
 
 ## Project
 
-This repository is a radar pulse deinterleaving research project.
+This repository targets radar pulse deinterleaving under an unknown number of emitters.
 
-It is based on a previous TCAN paper reproduction repository, but the goal of this repository is different.
+The long-term goal is not fixed-class sequence labeling. The target pipeline is:
 
-The previous repository reproduced a closed-set supervised TCAN sequence labeling pipeline.
+1. Load PDW pulse trains.
+2. Split pulse trains into pulse-level windows.
+3. Generate pulse-level contextual embeddings.
+4. Cluster embeddings using non-parametric clustering.
+5. Estimate emitter count.
+6. Evaluate with clustering metrics.
 
-This repository targets the task described in the project proposal:
+## Current branch
 
-- unknown number of emitters
-- mixed radar pulse streams
-- pulse-level embedding learning
-- non-parametric clustering
-- source-count estimation
-- robust deinterleaving under complex electromagnetic conditions
+feat/tsrd-window-clustering-baseline
 
 ## Current objective
 
-Phase 1 of this repository is to prepare the project for the proposal-oriented deinterleaving task.
+Implement Phase 1B: TSRD windowing and raw-feature clustering baseline.
 
-The first technical step is:
+Phase 1A TSRD loader has already been implemented.
 
-Phase 1A: Turing Synthetic Radar Dataset loader and data adapter.
-
-Do not implement embedding clustering yet.
+Do not implement TCAN embedding yet.
 Do not implement triplet loss yet.
-Do not implement HDBSCAN yet.
-Do not rewrite TCAN yet.
+Do not implement supervised contrastive loss yet.
+Do not modify the TCAN model.
+Do not train deep models in this branch.
 
-First, only make the dataset loading and field mapping clean.
+## Main task
 
-## Existing inherited components
+Add a basic unknown-source-count clustering evaluation pipeline using raw PDW-derived features.
 
-The repository currently inherits code from the TCAN reproduction project:
+The pipeline should be:
 
-- synthetic PDW simulator
-- DTOA preprocessing
-- binary input preprocessing
-- focal loss
-- signal sparsity simulation
-- nonideal condition simulation
-- TCAN sequence labeling model
+TSRD pulse train
+-> sort by TOA
+-> compute DTOA
+-> build 4d or 5d features
+-> split into fixed-length pulse windows
+-> normalize features
+-> cluster each window
+-> evaluate clustering against true labels
 
-These components can be reused, but the long-term goal is not fixed-class classification.
+## Required files
 
-## Long-term target pipeline
+Create or update:
 
-The target proposal-oriented pipeline is:
+- src/tsrd_window_dataset.py
+- src/clustering_baselines.py
+- src/clustering_metrics.py
+- run_tsrd_clustering_baseline.py
+- README.md
 
-1. Load PDW pulse trains.
-2. Normalize and preprocess PDW features.
-3. Generate pulse-level contextual embeddings using TCAN or Transformer encoder.
-4. Train embeddings using metric learning, such as triplet loss or supervised contrastive loss.
-5. Cluster embeddings using HDBSCAN, DBSCAN, or hierarchical clustering.
-6. Estimate the number of emitters from clustering results.
-7. Evaluate clustering quality using V-measure, ARI, AMI, Homogeneity, Completeness, and source-count error.
-8. Apply post-processing such as cluster merging, cluster splitting, and boundary pulse reassignment.
+## Windowing
 
-## Current branch recommendation
+Support pulse-count windows:
 
-Use a new branch:
+- window_size
+- stride
+- max_windows
 
-feat/tsrd-loader
+Default:
 
-## Current task
+- window_size = 1024
+- stride = 1024
+- max_windows = 10
 
-Implement a dataset adapter for the Turing Synthetic Radar Dataset.
+Each window should return:
 
-The adapter should convert one pulse train into the internal format used by this project.
+X_window: [window_size, feature_dim]
+y_window: [window_size]
+metadata:
+  source file
+  start index
+  end index
+  true source count
 
-Expected internal PDW format:
+## Feature sets
 
-[TOA, PW, RF, AOA, PA]
+Support:
 
-Expected label format:
+4d:
+[DTOA, PW, RF, AOA]
 
-labels: integer emitter labels within the current pulse train.
+5d:
+[DTOA, PW, RF, AOA, PA]
 
-Important:
+Normalize features per window using StandardScaler or RobustScaler.
 
-- Sort pulses by TOA.
-- Reorder labels consistently after sorting.
-- Do not assume that the same label ID across different pulse trains represents the same physical emitter.
-- Do not upload dataset files to GitHub.
+## Clustering methods
 
-## Files to create or update
+Implement:
+
+1. DBSCAN
+2. AgglomerativeClustering with oracle true source count for sanity check
+3. Optional HDBSCAN if the package is installed
+
+If hdbscan is not installed, print a clear message and continue.
+
+## Metrics
+
+For each window, compute:
+
+- homogeneity
+- completeness
+- v_measure
+- adjusted_rand_index
+- adjusted_mutual_info
+- true_source_count
+- estimated_source_count
+- source_count_error
+- abs_source_count_error
+- noise_ratio if cluster label -1 exists
+
+Aggregate metrics across windows and print mean values.
+
+## Command-line script
 
 Create:
 
-- src/tsrd_loader.py
+run_tsrd_clustering_baseline.py
 
-Update if needed:
+Arguments:
 
-- src/preprocessing.py
-- train.py
-- README.md
-- .gitignore
-
-## Command-line support
-
-Add optional arguments to train.py:
-
---data-source synthetic/tsrd
 --tsrd-path
 --feature-set 4d/5d
+--window-size
+--stride
+--max-windows
+--method dbscan/hdbscan/agglomerative_oracle
+--eps
+--min-samples
+--min-cluster-size
 
-Default must remain:
+Example:
 
---data-source synthetic
-
-so that existing synthetic experiments still run.
-
-## Feature mapping
-
-TSRD PDW fields should be mapped as:
-
-TOA -> TOA
-Pulse Width -> PW
-Centre Frequency -> RF
-Angle of Arrival -> AOA
-Amplitude -> PA
-
-For feature-set 4d:
-
-DTOA input:
-[DTOA, PW, RF, AOA]
-
-Binary input:
-[binary_presence, PW, RF, AOA]
-
-For feature-set 5d:
-
-DTOA input:
-[DTOA, PW, RF, AOA, PA]
-
-Binary input:
-[binary_presence, PW, RF, AOA, PA]
+python run_tsrd_clustering_baseline.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 5 --method dbscan
 
 ## Constraints
 
-Do not train on the full TSRD dataset in this branch.
-
-Do not implement clustering in this branch.
-
+Do not upload data files.
+Do not commit outputs.
+Do not implement neural embedding in this branch.
 Do not implement triplet loss in this branch.
-
-Do not implement HDBSCAN in this branch.
-
-Do not implement source-count estimation in this branch.
-
-Do not commit large data files.
+Do not implement source-count correction or post-processing yet.
 
 ## Verification
 
-The following commands should still run:
+The following should run:
 
-python train.py --data-source synthetic --input-format dtoa --epochs 2
-python train.py --data-source synthetic --input-format binary --epochs 2
+python run_tsrd_clustering_baseline.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --method dbscan
 
-If a local TSRD file is provided, this command should run or fail gracefully with a clear error message:
-
-python train.py --data-source tsrd --tsrd-path <path_to_file> --input-format dtoa --feature-set 5d --epochs 2
-
-## Git
-
-Do not commit automatically unless asked.
+python run_tsrd_clustering_baseline.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --method agglomerative_oracle
 
 After implementation, report:
 
-1. files modified
-2. TSRD field mapping
-3. supported feature sets
-4. how to run synthetic mode
-5. how to run TSRD mode
-6. current limitations
-7. next step toward embedding clustering
+1. Files modified
+2. How windows are constructed
+3. How source count is estimated
+4. Which clustering metrics are computed
+5. Baseline results on the test file
+6. Limitations
