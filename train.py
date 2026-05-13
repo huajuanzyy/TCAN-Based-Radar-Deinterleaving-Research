@@ -2,14 +2,9 @@
 
 import argparse
 import numpy as np
-import torch
-from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
 
 from src.data_simulator import PDW_COLUMNS, generate_interleaved_stream
-from src.losses import build_loss
 from src.metrics import average_recall, class_counts, confusion_matrix, recall_per_class
-from src.model_tcan import TCAN
 from src.nonideal import (
     apply_measurement_error,
     apply_random_pulse_loss,
@@ -23,20 +18,29 @@ from src.preprocessing import (
     pdw_to_dtoa_features,
 )
 from src.sparsity import apply_signal_sparsity, sparsity_ratio_to_gap_ratio
-from src.utils import get_device, set_random_seed
+from src.tsrd_loader import INTERNAL_PDW_COLUMNS, TSRDLoadError, load_tsrd_pulse_train
 
 
 SEED = 42
-INPUT_DIM = 4
 DEFAULT_WINDOW_SIZE = 64
 DEFAULT_BATCH_SIZE = 16
 DEFAULT_EPOCHS = 12
 LEARNING_RATE = 1e-3
+SYNTHETIC_PA_VALUE = 1.0
+
+torch = None
+DataLoader = None
+TensorDataset = None
 
 
-def split_stream(pdw_stream, train_fraction=0.8):
-    split_index = int(len(pdw_stream) * train_fraction)
-    return pdw_stream[:split_index], pdw_stream[split_index:]
+def split_pdw_and_labels(pdw_array, labels, train_fraction=0.8):
+    split_index = int(len(pdw_array) * train_fraction)
+    return (
+        pdw_array[:split_index],
+        labels[:split_index],
+        pdw_array[split_index:],
+        labels[split_index:],
+    )
 
 
 def build_dataloader(
@@ -81,7 +85,6 @@ def train_one_epoch(
     return total_loss / total_positions
 
 
-@torch.no_grad()
 def evaluate(
     model,
     dataloader,
@@ -91,11 +94,12 @@ def evaluate(
     predictions = []
     targets = []
 
-    for features, labels in dataloader:
-        features = features.to(device)
-        logits = model(features)
-        predictions.append(torch.argmax(logits, dim=-1).cpu().numpy())
-        targets.append(labels.numpy())
+    with torch.no_grad():
+        for features, labels in dataloader:
+            features = features.to(device)
+            logits = model(features)
+            predictions.append(torch.argmax(logits, dim=-1).cpu().numpy())
+            targets.append(labels.numpy())
 
     return np.concatenate(targets, axis=0), np.concatenate(predictions, axis=0)
 
@@ -103,6 +107,23 @@ def evaluate(
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Train TCAN with DTOA or binary input for radar pulse labeling."
+    )
+    parser.add_argument(
+        "--data-source",
+        choices=["synthetic", "tsrd"],
+        default="synthetic",
+        help="Dataset source. Defaults to the inherited synthetic pipeline.",
+    )
+    parser.add_argument(
+        "--tsrd-path",
+        default=None,
+        help="Path to one local TSRD pulse-train file when --data-source tsrd.",
+    )
+    parser.add_argument(
+        "--feature-set",
+        choices=["4d", "5d"],
+        default="4d",
+        help="Feature set: 4d excludes PA, 5d includes PA.",
     )
     parser.add_argument(
         "--input-format",
@@ -206,7 +227,10 @@ def parse_args():
         default=0.0,
         help="Spurious pulse insertion rate relative to current pulse count.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.data_source == "tsrd" and not args.tsrd_path:
+        parser.error("--tsrd-path is required when --data-source tsrd.")
+    return args
 
 
 def maybe_apply_sparsity(pdw_stream, args):
@@ -267,9 +291,58 @@ def apply_nonideal_conditions(pdw_stream, args):
     }
 
 
-def build_dtoa_windows(train_stream, test_stream, window_size, num_classes):
-    train_features, train_labels = pdw_to_dtoa_features(train_stream)
-    test_features, test_labels = pdw_to_dtoa_features(test_stream)
+def synthetic_stream_to_internal(pdw_stream):
+    labels = pdw_stream[:, 4].astype(np.int64)
+    pa = np.full((len(pdw_stream), 1), SYNTHETIC_PA_VALUE, dtype=np.float64)
+    pdw_array = np.column_stack([pdw_stream[:, :4], pa]).astype(np.float64)
+    return pdw_array, labels
+
+
+def load_source_data(args):
+    if args.data_source == "synthetic":
+        pdw_stream = generate_interleaved_stream(pulses_per_emitter=900, seed=SEED)
+        pdw_stream, before_count, after_count, retained_ratio = maybe_apply_sparsity(
+            pdw_stream,
+            args,
+        )
+        pdw_stream, nonideal_counts = apply_nonideal_conditions(pdw_stream, args)
+        pdw_array, labels = synthetic_stream_to_internal(pdw_stream)
+        return pdw_array, labels, {
+            "before_sparsity": before_count,
+            "after_sparsity": after_count,
+            "retained_ratio": retained_ratio,
+            "nonideal_counts": nonideal_counts,
+        }
+
+    try:
+        pdw_array, labels = load_tsrd_pulse_train(args.tsrd_path)
+    except TSRDLoadError as exc:
+        raise SystemExit(f"Failed to load TSRD pulse train: {exc}") from exc
+
+    return pdw_array, labels, {
+        "path": args.tsrd_path,
+    }
+
+
+def build_dtoa_windows(
+    train_pdw,
+    train_labels,
+    test_pdw,
+    test_labels,
+    window_size,
+    num_classes,
+    feature_set,
+):
+    train_features, train_labels = pdw_to_dtoa_features(
+        train_pdw,
+        labels=train_labels,
+        feature_set=feature_set,
+    )
+    test_features, test_labels = pdw_to_dtoa_features(
+        test_pdw,
+        labels=test_labels,
+        feature_set=feature_set,
+    )
 
     norm_stats = fit_minmax(train_features)
     train_features = apply_minmax(train_features, norm_stats)
@@ -288,17 +361,31 @@ def build_dtoa_windows(train_stream, test_stream, window_size, num_classes):
     return x_train, y_train, x_test, y_test, num_classes
 
 
-def build_binary_windows(train_stream, test_stream, window_size, ts, num_classes):
-    pdw_norm_stats = fit_minmax(train_stream[:, 1:4].astype(np.float32))
+def build_binary_windows(
+    train_pdw,
+    train_labels,
+    test_pdw,
+    test_labels,
+    window_size,
+    ts,
+    num_classes,
+    feature_set,
+):
+    parameter_end = 5 if feature_set == "5d" else 4
+    pdw_norm_stats = fit_minmax(train_pdw[:, 1:parameter_end].astype(np.float32))
     train_features, train_labels = create_binary_features(
-        train_stream,
+        train_pdw,
         ts=ts,
+        labels=train_labels,
         stats=pdw_norm_stats,
+        feature_set=feature_set,
     )
     test_features, test_labels = create_binary_features(
-        test_stream,
+        test_pdw,
         ts=ts,
+        labels=test_labels,
         stats=pdw_norm_stats,
+        feature_set=feature_set,
     )
 
     x_train, y_train = create_fixed_length_windows(
@@ -314,19 +401,47 @@ def build_binary_windows(train_stream, test_stream, window_size, ts, num_classes
     return x_train, y_train, x_test, y_test, num_classes
 
 
-def determine_num_classes(input_format, spurious_rate):
-    has_spurious = spurious_rate > 0.0
+def determine_num_classes(input_format, labels):
+    pulse_classes = int(labels.max()) + 1
     if input_format == "dtoa":
-        return 5 if has_spurious else 4
-    return 6 if has_spurious else 5
+        return pulse_classes
+    return pulse_classes + 1
+
+
+def import_training_dependencies():
+    global torch, DataLoader, TensorDataset
+    try:
+        import torch as torch_module
+        from torch.utils.data import DataLoader as data_loader_class
+        from torch.utils.data import TensorDataset as tensor_dataset_class
+        from src.losses import build_loss
+        from src.model_tcan import TCAN
+        from src.utils import get_device, set_random_seed
+    except ModuleNotFoundError as exc:
+        missing_name = exc.name or "a required module"
+        raise SystemExit(
+            f"Training requires PyTorch and the TCAN dependencies, but '{missing_name}' "
+            "is not available in this Python environment."
+        ) from exc
+
+    torch = torch_module
+    DataLoader = data_loader_class
+    TensorDataset = tensor_dataset_class
+    return build_loss, TCAN, get_device, set_random_seed
 
 
 def main():
     args = parse_args()
+    pdw_array, labels, source_info = load_source_data(args)
+    train_pdw, train_labels, test_pdw, test_labels = split_pdw_and_labels(pdw_array, labels)
+
+    build_loss, TCAN, get_device, set_random_seed = import_training_dependencies()
     set_random_seed(SEED)
     device = get_device()
     print(f"Using device: {device}")
+    print(f"Selected data source: {args.data_source}")
     print(f"Selected input format: {args.input_format}")
+    print(f"Selected feature set: {args.feature_set}")
     print(f"Selected loss function: {args.loss}")
     print(f"Selected sparsity ratio: {args.sparsity_ratio}")
     print(f"Visible duration: {args.visible_duration}")
@@ -339,39 +454,50 @@ def main():
     print(f"Pulse loss rate: {args.pulse_loss_rate}")
     print(f"Spurious pulse rate: {args.spurious_rate}")
 
-    pdw_stream = generate_interleaved_stream(pulses_per_emitter=900, seed=SEED)
-    pdw_stream, before_count, after_count, retained_ratio = maybe_apply_sparsity(pdw_stream, args)
-    pdw_stream, nonideal_counts = apply_nonideal_conditions(pdw_stream, args)
-    train_stream, test_stream = split_stream(pdw_stream)
-    print(f"PDW columns: {PDW_COLUMNS}")
-    print(f"Pulse count before sparsity: {before_count}")
-    print(f"Pulse count after sparsity: {after_count}")
-    print(f"Retained pulse ratio: {retained_ratio:.4f}")
-    print(f"Pulse count before nonideal conditions: {nonideal_counts['before']}")
+    print(f"Internal PDW columns: {INTERNAL_PDW_COLUMNS}")
+    if args.data_source == "synthetic":
+        nonideal_counts = source_info["nonideal_counts"]
+        print(f"Synthetic source columns: {PDW_COLUMNS}")
+        print(f"Synthetic PA placeholder value: {SYNTHETIC_PA_VALUE}")
+        print(f"Pulse count before sparsity: {source_info['before_sparsity']}")
+        print(f"Pulse count after sparsity: {source_info['after_sparsity']}")
+        print(f"Retained pulse ratio: {source_info['retained_ratio']:.4f}")
+        print(f"Pulse count before nonideal conditions: {nonideal_counts['before']}")
+        print(
+            "Pulse count after measurement error: "
+            f"{nonideal_counts['after_measurement_error']}"
+        )
+        print(f"Pulse count after pulse loss: {nonideal_counts['after_pulse_loss']}")
+        print(f"Pulse count after spurious insertion: {nonideal_counts['after_spurious']}")
+    else:
+        print(f"TSRD path: {source_info['path']}")
+        print("TSRD mode loads one pulse train and remaps labels locally.")
     print(
-        "Pulse count after measurement error: "
-        f"{nonideal_counts['after_measurement_error']}"
+        f"Total pulses: {len(pdw_array)} | train: {len(train_pdw)} | test: {len(test_pdw)}"
     )
-    print(f"Pulse count after pulse loss: {nonideal_counts['after_pulse_loss']}")
-    print(f"Pulse count after spurious insertion: {nonideal_counts['after_spurious']}")
-    print(f"Total pulses: {len(pdw_stream)} | train: {len(train_stream)} | test: {len(test_stream)}")
 
-    num_classes = determine_num_classes(args.input_format, args.spurious_rate)
+    num_classes = determine_num_classes(args.input_format, labels)
     if args.input_format == "dtoa":
         x_train, y_train, x_test, y_test, num_classes = build_dtoa_windows(
-            train_stream,
-            test_stream,
+            train_pdw,
+            train_labels,
+            test_pdw,
+            test_labels,
             args.window_size,
             num_classes,
+            args.feature_set,
         )
     else:
         print(f"Binary sampling interval Ts: {args.ts}")
         x_train, y_train, x_test, y_test, num_classes = build_binary_windows(
-            train_stream,
-            test_stream,
+            train_pdw,
+            train_labels,
+            test_pdw,
+            test_labels,
             args.window_size,
             args.ts,
             num_classes,
+            args.feature_set,
         )
 
     print(f"Train input tensor shape [B, T, D]: {x_train.shape}")
@@ -385,7 +511,7 @@ def main():
     train_loader = build_dataloader(x_train, y_train, args.batch_size, shuffle=True)
     test_loader = build_dataloader(x_test, y_test, args.batch_size, shuffle=False)
 
-    model = TCAN(input_dim=INPUT_DIM, num_classes=num_classes).to(device)
+    model = TCAN(input_dim=x_train.shape[-1], num_classes=num_classes).to(device)
     criterion, alpha = build_loss(
         loss_name=args.loss,
         gamma=args.gamma,
