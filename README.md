@@ -719,3 +719,73 @@ Confusion matrix:
 - 没有实现 CDIF、SDIF、PRI Transform 等对比方法。
 - 没有进行论文级多场景、多噪声、多密度实验。
 - 没有生成完整对比图表。
+
+## Phase 1B: TSRD Windowing and Raw-feature Clustering Baseline
+
+Phase 1B 的目标是先建立未知源数分选的评价链路，而不是训练深度模型。当前阶段使用 TSRD 的原始 PDW 派生特征做 clustering baseline，用来检查窗口构造、聚类输出、源数估计和聚类指标是否能够端到端跑通。后续 TCAN embedding 或 Transformer embedding 可以替换这里的 raw feature 输入，但评价代码应继续复用。
+
+window 是按 pulse count 构造的固定长度片段：
+
+```text
+window_size: 每个窗口包含的 pulse 数量
+stride: 相邻窗口起点之间相隔的 pulse 数量
+max_windows: 最多评估多少个窗口
+```
+
+例如 `window_size=1024, stride=1024` 表示按 1024 个 pulse 做不重叠切分；如果 `stride < window_size`，则会产生重叠窗口。每个窗口都会返回：
+
+```text
+X_window: [window_size, feature_dim]
+y_window: [window_size]
+metadata: source file, start index, end index, true source count
+```
+
+当前支持两种 raw feature set：
+
+```text
+4d: [DTOA, PW, RF, AOA]
+5d: [DTOA, PW, RF, AOA, PA]
+```
+
+其中 DTOA 在完整 pulse train 按 TOA 排序后计算，第一个 pulse 的 DTOA 置为 0。每个窗口在聚类前使用 `StandardScaler` 独立标准化。
+
+当前 baseline 方法包括：
+
+```text
+dbscan: 非参数聚类，可以输出噪声点 -1，但对 eps 和 min_samples 敏感。
+hdbscan: 可选方法，如果本地未安装 hdbscan 包，会打印清楚提示并跳过。
+agglomerative_oracle: 使用真实 source count 作为 n_clusters 的层次聚类，仅用于 sanity check。
+```
+
+这里不能使用分类 accuracy 作为主要指标，因为未知源数分选中的 cluster ID 没有固定语义。例如预测 cluster 0 与真实 label 17 对齐并不重要，重要的是同源 pulse 是否被聚到一起、不同源 pulse 是否被分开。因此当前使用聚类指标：
+
+```text
+homogeneity
+completeness
+v_measure
+adjusted_rand_index
+adjusted_mutual_info
+```
+
+source count 的估计方式是统计预测聚类标签中的不同 cluster 数量，但不把 `-1` 噪声点算作一个 emitter：
+
+```text
+estimated_source_count = number of unique predicted labels excluding -1
+source_count_error = estimated_source_count - true_source_count
+abs_source_count_error = abs(source_count_error)
+noise_ratio = predicted label 为 -1 的 pulse 比例
+```
+
+运行 DBSCAN baseline：
+
+```powershell
+python run_tsrd_clustering_baseline.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --method dbscan
+```
+
+运行 oracle source-count 层次聚类 baseline：
+
+```powershell
+python run_tsrd_clustering_baseline.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --method agglomerative_oracle
+```
+
+如果当前环境中没有安装 HDBSCAN，可以先跳过该方法；DBSCAN 与 `agglomerative_oracle` 已足够验证 Phase 1B 的窗口与评价链路。
