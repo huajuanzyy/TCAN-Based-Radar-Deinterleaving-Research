@@ -1,3 +1,56 @@
+# 项目定位
+
+本仓库面向任务书中的未知辐射源数量雷达脉冲分选问题。当前代码继承了早期 TCAN 论文复现仓库中的基础能力，包括 synthetic PDW 生成、DTOA 预处理、binary 输入预处理、focal loss、信号稀疏仿真、非理想接收条件仿真，以及 TCAN sequence-labeling 模型。
+
+本仓库的长期目标不是停留在固定类别数的监督式分类，而是逐步转向脉冲级 embedding learning 与 non-parametric clustering。后续可以使用 TCAN 或 Transformer encoder 生成上下文脉冲嵌入，再使用聚类方法在未知源数条件下完成分选。
+
+## Phase 1A：Turing Synthetic Radar Dataset Loader
+
+Phase 1A 只实现 Turing Synthetic Radar Dataset 的数据加载与字段适配。本阶段不实现 triplet loss、不实现 HDBSCAN、不实现源数估计，也不实现 embedding clustering 训练目标。
+
+TSRD 字段到内部 PDW 格式的映射如下：
+
+```text
+TOA              -> TOA
+Pulse Width      -> PW
+Centre Frequency -> RF
+Angle of Arrival -> AOA
+Amplitude        -> PA
+```
+
+TSRD adapter 返回：
+
+```text
+pdw_array: [TOA, PW, RF, AOA, PA]
+labels: 当前 pulse train 内部的整数 emitter labels
+```
+
+loader 会按 `TOA` 升序稳定排序，并用相同顺序重排 labels。labels 会在当前 pulse train 内部重新映射为连续整数，因此不同文件中的相同 label ID 不应被默认理解为同一个物理辐射源。
+
+当前支持的 feature set：
+
+```text
+4d DTOA input:   [DTOA, PW, RF, AOA]
+5d DTOA input:   [DTOA, PW, RF, AOA, PA]
+4d binary input: [binary_presence, PW, RF, AOA]
+5d binary input: [binary_presence, PW, RF, AOA, PA]
+```
+
+synthetic mode 仍然是默认模式：
+
+```bash
+python train.py --data-source synthetic --input-format dtoa --epochs 2
+python train.py --data-source synthetic --input-format binary --epochs 2
+```
+
+TSRD mode 需要一个本地 pulse train 文件，并且文件中包含可识别的字段名：
+
+```bash
+python train.py --data-source tsrd --tsrd-path <path_to_file> --input-format dtoa --feature-set 5d --epochs 2
+```
+
+如果使用 `--data-source tsrd` 但没有提供 `--tsrd-path`，程序会给出明确的参数错误。TSRD 数据文件应保留在本地，不应提交到 Git。
+
 # Radar Pulse Deinterleaving Research Project
 
 本仓库面向复杂电磁环境下的多辐射源雷达脉冲分选任务。
