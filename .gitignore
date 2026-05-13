@@ -1,26 +1,28 @@
 # Python cache
 __pycache__/
 *.py[cod]
-*$py.class
 
-# Virtual environments
-.venv/
-venv/
-env/
+# IDE
+.vscode/
 
-# Jupyter
-.ipynb_checkpoints/
-
-# PyTorch model files
-*.pt
-*.pth
-*.ckpt
+# Data
+data/
+datasets/
+*.h5
+*.hdf5
+*.npz
+*.npy
+*.csv
+*.parquet
 
 # Training outputs
 outputs/
 runs/
 logs/
 checkpoints/
+*.pt
+*.pth
+*.ckpt
 
 # Dataset files
 data/

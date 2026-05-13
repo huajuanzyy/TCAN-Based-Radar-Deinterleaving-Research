@@ -1,6 +1,29 @@
-# TCAN 雷达脉冲去交错最小复现版本
+# Radar Pulse Deinterleaving Research Project
 
-本仓库用于复现论文：
+本仓库面向复杂电磁环境下的多辐射源雷达脉冲分选任务。
+
+本仓库基于已有 TCAN 论文复现代码继续扩展，但目标不再局限于固定类别数的监督式 sequence labeling，而是逐步转向：
+
+1. 接入公开雷达脉冲去交错数据集；
+2. 构建脉冲级上下文嵌入表示；
+3. 使用 triplet loss / supervised contrastive loss 进行度量学习；
+4. 使用 HDBSCAN / DBSCAN / 层次聚类进行未知源数分选；
+5. 使用 V-measure、ARI、AMI、Homogeneity、Completeness、源数估计误差等指标评估分选效果。
+
+当前从原 TCAN 复现仓库继承了以下基础能力：
+
+- synthetic PDW generation
+- DTOA input
+- binary input
+- focal loss
+- signal sparsity
+- nonideal receiving conditions
+
+下一阶段优先接入 Turing Synthetic Radar Dataset，并先完成数据加载与格式适配。
+
+## Legacy TCAN Reproduction Components
+
+用于复现论文：
 
 > Deinterleaving of Intercepted Radar Pulse Streams via Temporal Convolutional Attention Network
 
@@ -643,20 +666,3 @@ Confusion matrix:
 - 没有实现 CDIF、SDIF、PRI Transform 等对比方法。
 - 没有进行论文级多场景、多噪声、多密度实验。
 - 没有生成完整对比图表。
-
-## 下一阶段建议
-
-下一阶段可以在当前代码基础上继续扩展：
-
-1. 对照论文补充更完整的数据仿真参数。
-2. 改进 binary input 的 time-bin 碰撞处理策略。
-3. 扩展 focal loss 的 manual alpha 配置和更系统的类别不均衡实验。
-4. 为不同 emitter 设置不同 scan gate、扫描周期或相位。
-5. 增加 MFR 雷达仿真。
-6. 加入 CDIF、SDIF、PRI Transform 等传统方法作为对比。
-7. 增加多组实验配置，例如不同脉冲密度、不同抖动强度、不同丢失率和噪声水平。
-7. 输出更完整的实验表格和图形。
-
-## 注意事项
-
-当前代码的目标是保证 Phase 1 正确、清晰、可运行。后续扩展时应继续保持数据和标签严格对齐，尤其要避免窗口切分后出现输入脉冲和标签错位的问题。

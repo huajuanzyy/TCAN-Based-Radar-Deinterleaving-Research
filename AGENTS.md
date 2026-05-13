@@ -2,234 +2,178 @@
 
 ## Project
 
-This repository reproduces the radar pulse deinterleaving method from:
+This repository is a radar pulse deinterleaving research project.
 
-"Deinterleaving of Intercepted Radar Pulse Streams via Temporal Convolutional Attention Network"
+It is based on a previous TCAN paper reproduction repository, but the goal of this repository is different.
 
-The implementation uses Python and PyTorch.
+The previous repository reproduced a closed-set supervised TCAN sequence labeling pipeline.
 
-## Current branch
+This repository targets the task described in the project proposal:
 
-feat/nonideal-conditions
+- unknown number of emitters
+- mixed radar pulse streams
+- pulse-level embedding learning
+- non-parametric clustering
+- source-count estimation
+- robust deinterleaving under complex electromagnetic conditions
 
 ## Current objective
 
-This branch implements Phase 5: nonideal receiving conditions for the TCAN radar pulse deinterleaving pipeline.
+Phase 1 of this repository is to prepare the project for the proposal-oriented deinterleaving task.
 
-Previous phases have already been implemented and merged into main:
+The first technical step is:
 
-- Phase 1: DTOA input
-- Phase 2: Binary input
-- Phase 3: Focal loss
-- Phase 4: Signal sparsity
+Phase 1A: Turing Synthetic Radar Dataset loader and data adapter.
 
-Do not rewrite the existing DTOA pipeline, binary pipeline, TCAN model, focal loss, or signal sparsity unless necessary.
+Do not implement embedding clustering yet.
+Do not implement triplet loss yet.
+Do not implement HDBSCAN yet.
+Do not rewrite TCAN yet.
 
-## Main task for this branch
+First, only make the dataset loading and field mapping clean.
 
-Add three nonideal conditions:
+## Existing inherited components
 
-1. Measurement error
-2. Random pulse loss
-3. Spurious pulses
+The repository currently inherits code from the TCAN reproduction project:
 
-These conditions should be applied at the PDW level before DTOA or binary preprocessing.
+- synthetic PDW simulator
+- DTOA preprocessing
+- binary input preprocessing
+- focal loss
+- signal sparsity simulation
+- nonideal condition simulation
+- TCAN sequence labeling model
 
-The pipeline should be:
+These components can be reused, but the long-term goal is not fixed-class classification.
 
-1. Generate full PDW pulse stream.
-2. Optionally apply signal sparsity.
-3. Apply nonideal conditions.
-4. Apply DTOA or binary preprocessing.
-5. Train and evaluate TCAN.
+## Long-term target pipeline
 
-## Important distinction
+The target proposal-oriented pipeline is:
 
-Signal sparsity is not random pulse loss.
+1. Load PDW pulse trains.
+2. Normalize and preprocess PDW features.
+3. Generate pulse-level contextual embeddings using TCAN or Transformer encoder.
+4. Train embeddings using metric learning, such as triplet loss or supervised contrastive loss.
+5. Cluster embeddings using HDBSCAN, DBSCAN, or hierarchical clustering.
+6. Estimate the number of emitters from clustering results.
+7. Evaluate clustering quality using V-measure, ARI, AMI, Homogeneity, Completeness, and source-count error.
+8. Apply post-processing such as cluster merging, cluster splitting, and boundary pulse reassignment.
 
-Signal sparsity removes continuous time intervals due to periodic visibility caused by radar scanning.
+## Current branch recommendation
 
-Random pulse loss randomly removes individual pulses.
+Use a new branch:
 
-Do not mix these two mechanisms.
+feat/tsrd-loader
 
-## Required implementation
+## Current task
 
-Create or update:
+Implement a dataset adapter for the Turing Synthetic Radar Dataset.
 
-- src/nonideal.py
+The adapter should convert one pulse train into the internal format used by this project.
+
+Expected internal PDW format:
+
+[TOA, PW, RF, AOA, PA]
+
+Expected label format:
+
+labels: integer emitter labels within the current pulse train.
+
+Important:
+
+- Sort pulses by TOA.
+- Reorder labels consistently after sorting.
+- Do not assume that the same label ID across different pulse trains represents the same physical emitter.
+- Do not upload dataset files to GitHub.
+
+## Files to create or update
+
+Create:
+
+- src/tsrd_loader.py
+
+Update if needed:
+
+- src/preprocessing.py
 - train.py
 - README.md
+- .gitignore
 
-If needed, small changes are allowed in:
+## Command-line support
 
-- src/data_simulator.py
-- src/preprocessing.py
-- src/metrics.py
-- src/utils.py
+Add optional arguments to train.py:
 
-## Measurement error
+--data-source synthetic/tsrd
+--tsrd-path
+--feature-set 4d/5d
 
-Implement:
+Default must remain:
 
-apply_measurement_error(
-    pdw_array,
-    toa_std=0.0,
-    pw_std=0.0,
-    rf_std=0.0,
-    doa_std=0.0,
-    seed=None
-)
+--data-source synthetic
 
-The function should add Gaussian noise to:
+so that existing synthetic experiments still run.
 
-- TOA
-- PW
-- RF
-- DOA
+## Feature mapping
 
-PW must be clipped to remain positive.
+TSRD PDW fields should be mapped as:
 
-After adding TOA noise, sort the pulses by TOA again and reorder labels consistently.
+TOA -> TOA
+Pulse Width -> PW
+Centre Frequency -> RF
+Angle of Arrival -> AOA
+Amplitude -> PA
 
-## Random pulse loss
+For feature-set 4d:
 
-Implement:
+DTOA input:
+[DTOA, PW, RF, AOA]
 
-apply_random_pulse_loss(
-    pdw_array,
-    labels,
-    loss_rate,
-    seed=None
-)
+Binary input:
+[binary_presence, PW, RF, AOA]
 
-The function should randomly delete individual pulses.
+For feature-set 5d:
 
-This is different from signal sparsity.
+DTOA input:
+[DTOA, PW, RF, AOA, PA]
 
-## Spurious pulses
+Binary input:
+[binary_presence, PW, RF, AOA, PA]
 
-Implement:
+## Constraints
 
-apply_spurious_pulses(
-    pdw_array,
-    labels,
-    spurious_rate,
-    spurious_label,
-    seed=None
-)
+Do not train on the full TSRD dataset in this branch.
 
-The function should insert false pulses into the PDW stream.
+Do not implement clustering in this branch.
 
-Spurious pulse TOA should be sampled within the observation interval.
+Do not implement triplet loss in this branch.
 
-Spurious PW/RF/DOA can be sampled from the global PDW ranges or from configurable ranges.
+Do not implement HDBSCAN in this branch.
 
-After insertion, sort by TOA and reorder labels consistently.
+Do not implement source-count estimation in this branch.
 
-## Label design for spurious pulses
+Do not commit large data files.
 
-Use an extra spurious class.
+## Verification
 
-For DTOA input:
+The following commands should still run:
 
-- radar classes: 0, 1, 2, 3
-- spurious class: 4
+python train.py --data-source synthetic --input-format dtoa --epochs 2
+python train.py --data-source synthetic --input-format binary --epochs 2
 
-For binary input:
+If a local TSRD file is provided, this command should run or fail gracefully with a clear error message:
 
-- background class: 0
-- radar classes: 1, 2, 3, 4
-- spurious class: 5
+python train.py --data-source tsrd --tsrd-path <path_to_file> --input-format dtoa --feature-set 5d --epochs 2
 
-Make sure class labels are continuous and compatible with CrossEntropyLoss and FocalLoss.
-
-## Command-line arguments
-
-Update train.py to support:
-
---toa-error-std
---pw-error-std
---rf-error-std
---doa-error-std
-
---pulse-loss-rate
-
---spurious-rate
-
-Default values should disable these conditions:
-
---toa-error-std 0.0
---pw-error-std 0.0
---rf-error-std 0.0
---doa-error-std 0.0
---pulse-loss-rate 0.0
---spurious-rate 0.0
-
-Existing commands without nonideal options must still run.
-
-## Training output requirements
-
-Print:
-
-1. selected input format
-2. selected loss function
-3. selected sparsity ratio
-4. measurement error standard deviations
-5. pulse loss rate
-6. spurious pulse rate
-7. pulse count before nonideal conditions
-8. pulse count after measurement error
-9. pulse count after pulse loss
-10. pulse count after spurious insertion
-11. input tensor shape [B, T, D]
-12. label tensor shape [B, T]
-13. model output tensor shape [B, T, C]
-14. number of classes
-15. class counts
-16. recall per class
-17. average recall
-18. pulse-only average recall for binary input
-19. confusion matrix
-
-## Verification criteria
-
-This branch is complete only when the following smoke tests run successfully:
-
-```bash
-python train.py --input-format dtoa --loss focal --epochs 2 --toa-error-std 2.0
-python train.py --input-format dtoa --loss focal --epochs 2 --pulse-loss-rate 0.10
-python train.py --input-format dtoa --loss focal --epochs 2 --spurious-rate 0.10
-
-python train.py --input-format binary --loss focal --epochs 2 --toa-error-std 2.0
-python train.py --input-format binary --loss focal --epochs 2 --pulse-loss-rate 0.10
-python train.py --input-format binary --loss focal --epochs 2 --spurious-rate 0.10
-
-Also verify that the original non-noisy commands still work:
-
-python train.py --input-format dtoa --loss focal --epochs 2
-python train.py --input-format binary --loss focal --epochs 2
-Constraints
-
-Do not implement MFR simulation in this branch.
-
-Do not implement CDIF, SDIF, PRI Transform, GRU, LSTM, or TCN baselines in this branch.
-
-Do not generate complex comparison plots in this branch.
-
-Do not rewrite TCAN architecture.
-
-The goal is to add nonideal condition simulation cleanly and verify that existing pipelines still work.
-
-Git
+## Git
 
 Do not commit automatically unless asked.
 
 After implementation, report:
 
-files modified
-how each nonideal condition is implemented
-where in the pipeline nonideal conditions are applied
-how spurious pulse labels are handled
-smoke test commands used
-current limitations
+1. files modified
+2. TSRD field mapping
+3. supported feature sets
+4. how to run synthetic mode
+5. how to run TSRD mode
+6. current limitations
+7. next step toward embedding clustering
