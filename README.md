@@ -1,0 +1,662 @@
+# TCAN 雷达脉冲去交错最小复现版本
+
+本仓库用于复现论文：
+
+> Deinterleaving of Intercepted Radar Pulse Streams via Temporal Convolutional Attention Network
+
+当前代码支持两个输入版本：
+
+- Phase 1：基于 DTOA 输入的 TCAN 最小可运行复现流程。
+- Phase 2：在保留 DTOA pipeline 的基础上，新增 binary input 支持。
+- Phase 3：在保留 DTOA/binary input pipeline 的基础上，新增 focal loss 支持。
+- Phase 4：新增 signal sparsity 仿真与训练入口。
+- Phase 5：新增 nonideal receiving conditions，包括 measurement error、random pulse loss 和 spurious pulses。
+
+这个版本的重点不是完整复现论文中的全部实验，而是先把最核心的端到端训练流程跑通：
+
+1. 生成多个传统雷达源的脉冲描述字数据。
+2. 将多个雷达源的脉冲按到达时间排序，形成交错脉冲流。
+3. 将 `TOA` 转换为 `DTOA`。
+4. 支持使用 `[DTOA, PW, RF, DOA]` 或 `[binary_presence, PW, RF, DOA]` 作为模型输入特征。
+5. 使用 TCAN 模型进行逐脉冲序列标注。
+6. 输出每个脉冲位置对应的雷达源类别。
+7. 计算并打印 recall per class、average recall 和 confusion matrix。
+
+## Phase 1: DTOA-based TCAN Pipeline
+
+Phase 1 已实现：
+
+- 四类传统雷达源仿真：
+  - 固定 PRI 雷达
+  - 抖动 PRI 雷达
+  - 参差 PRI 雷达
+  - 驻留与切换 PRI 雷达
+- 每个脉冲包含以下 PDW 字段：
+  - `TOA`
+  - `PW`
+  - `RF`
+  - `DOA`
+  - `label`
+- 多雷达源脉冲合并后按 `TOA` 升序排序。
+- DTOA 预处理：
+  - `DTOA_i = TOA_i - TOA_{i-1}`
+  - 第一个脉冲的 `DTOA` 设为 `0`
+- 输入特征为 `[DTOA, PW, RF, DOA]`。
+- 对每个特征维度做 min-max 归一化。
+- 构造固定长度序列窗口。
+- 使用 TCAN 进行 sequence labeling，而不是整条序列分类。
+- 使用 PyTorch `CrossEntropyLoss`，并在所有脉冲位置上计算损失。
+- 评估指标包括：
+  - 每类 recall
+  - 平均 recall
+  - 混淆矩阵
+
+Phase 1 本身不包含 binary input；binary input 已在 Phase 2 中作为新增功能实现。
+
+当前仍未实现：
+
+- MFR 雷达仿真
+- CDIF、SDIF、PRI Transform
+- 论文级大规模实验
+- 多组对比图和复杂可视化
+
+## Phase 2: Binary Input Support
+
+Phase 2 在不重写 DTOA pipeline 的前提下，新增 binary input 训练方式。
+
+binary input 会将 `TOA` 按采样间隔 `Ts` 离散成 time bins。每个 time bin 的输入特征为：
+
+```text
+[binary_presence, PW, RF, DOA]
+```
+
+其中：
+
+- `binary_presence = 1` 表示该 time bin 中存在脉冲。
+- `binary_presence = 0` 表示该 time bin 中没有脉冲。
+- 如果 time bin 中没有脉冲，则 `PW/RF/DOA` 都填 `0`。
+- 如果 time bin 中有脉冲，则将该脉冲的 `PW/RF/DOA` 归一化后填入对应位置。
+
+binary input 的标签设计与 DTOA input 不同：
+
+- DTOA input 只对真实脉冲位置做序列标注，类别数为 `4`，标签为 `0, 1, 2, 3`。
+- binary input 包含没有脉冲的空 time bins，因此增加 background class，类别数为 `5`。
+- binary input 的类别编号连续，满足 `CrossEntropyLoss` 要求：
+
+```text
+background = 0
+radar label 0 -> class 1
+radar label 1 -> class 2
+radar label 2 -> class 3
+radar label 3 -> class 4
+```
+
+binary input 评估时会同时打印：
+
+- overall average recall：包含 background class 0 和 radar classes 1-4。
+- pulse-only average recall：只对 radar classes 1-4 求平均，不把 background class 0 计入平均值。
+
+当前 binary input 的简化限制：
+
+- 如果多个脉冲落入同一个 time bin，当前版本暂时保留最早 `TOA` 的那个脉冲。
+- 后续可以进一步实现碰撞统计、多脉冲聚合策略或更细粒度采样。
+
+## Phase 3: Focal Loss Support
+
+Phase 3 新增 focal loss，同时保留标准 cross entropy loss。
+
+训练脚本支持：
+
+```text
+--loss ce
+--loss focal
+--gamma
+--alpha-mode none 或 inverse_freq
+```
+
+focal loss 的逐位置定义为：
+
+```text
+L = - alpha_c * (1 - p_c)^gamma * log(p_c)
+```
+
+其中：
+
+- `p_c` 是真实类别 `c` 的预测概率。
+- `gamma` 控制对简单样本的抑制强度。
+- `alpha_c` 是类别权重。
+
+当前支持的 alpha 模式：
+
+- `none`：不使用类别权重。
+- `inverse_freq`：根据训练窗口中的标签频次计算反频率权重。
+
+`inverse_freq` 的权重计算方式为：
+
+```text
+alpha_c = total_count / (num_classes * count_c)
+```
+
+如果某个类别在训练窗口中没有出现，则该类别权重设为 `0`。
+
+focal loss 和 cross entropy loss 都在所有序列位置上计算。训练时仍然保持：
+
+```text
+logits: [B, T, C] -> [B*T, C]
+labels: [B, T]    -> [B*T]
+```
+
+当前 focal loss 只作为损失函数加入；MFR 和额外 baseline 不在当前实现范围内。
+
+## Phase 4: Signal Sparsity
+
+Phase 4 新增 signal sparsity 仿真，用于模拟雷达主瓣扫描导致的周期性可见和长时间不可见。
+
+signal sparsity 的形式是：
+
+```text
+visible pulse segment -> long missing interval -> visible pulse segment -> long missing interval
+```
+
+它和 random pulse loss 不同：
+
+- random pulse loss 是随机删除单个脉冲。
+- signal sparsity 是删除连续时间区间内的脉冲，形成 discontinuous but periodic intercepted pulse segments。
+
+当前实现使用统一 scan gate：
+
+```text
+scan_period = visible_duration * (1 + gap_ratio)
+phase = (TOA + phase_offset) % scan_period
+```
+
+如果：
+
+```text
+phase < visible_duration
+```
+
+则保留该脉冲；否则删除该脉冲。
+
+支持的 sparsity ratio：
+
+```text
+none: 不启用 signal sparsity
+1:3 : gap_ratio = 3，理论保留比例约 25%
+1:5 : gap_ratio = 5，理论保留比例约 16.7%
+1:8 : gap_ratio = 8，理论保留比例约 11.1%
+```
+
+signal sparsity 的位置在 pipeline 中非常重要。当前流程是：
+
+```text
+generate PDW stream
+-> apply signal sparsity
+-> DTOA 或 binary preprocessing
+-> windowing
+-> train TCAN
+```
+
+也就是说，sparsity 作用在原始 PDW 上，而不是在 DTOA 或 binary preprocessing 之后再删除样本。
+
+运行 DTOA sparsity smoke tests：
+
+```bash
+python train.py --input-format dtoa --loss focal --sparsity-ratio none --epochs 2
+python train.py --input-format dtoa --loss focal --sparsity-ratio 1:3 --epochs 2
+python train.py --input-format dtoa --loss focal --sparsity-ratio 1:5 --epochs 2
+python train.py --input-format dtoa --loss focal --sparsity-ratio 1:8 --epochs 2
+```
+
+运行 binary sparsity smoke tests：
+
+```bash
+python train.py --input-format binary --loss focal --sparsity-ratio none --epochs 2
+python train.py --input-format binary --loss focal --sparsity-ratio 1:3 --epochs 2
+python train.py --input-format binary --loss focal --sparsity-ratio 1:5 --epochs 2
+python train.py --input-format binary --loss focal --sparsity-ratio 1:8 --epochs 2
+```
+
+Phase 4 当前限制：
+
+- 所有 emitter 暂时使用统一 scan gate。
+- 没有实现 MFR 或 baseline 方法。
+
+## Phase 5: Nonideal Conditions
+
+Phase 5 在保留 DTOA input、binary input、focal loss 和 signal sparsity 的基础上，新增三类接收端非理想条件。
+
+nonideal conditions 的应用位置是 PDW 层，位于 signal sparsity 之后、DTOA/binary preprocessing 之前：
+
+```text
+generate PDW stream
+-> optional signal sparsity
+-> nonideal conditions
+-> DTOA 或 binary preprocessing
+-> windowing
+-> train TCAN
+```
+
+### Measurement Error
+
+measurement error 用于模拟接收机测量误差。当前实现对以下 PDW 字段添加高斯噪声：
+
+```text
+TOA, PW, RF, DOA
+```
+
+对应命令行参数：
+
+```text
+--toa-error-std
+--pw-error-std
+--rf-error-std
+--doa-error-std
+```
+
+`PW` 加噪后会裁剪到正数。`TOA` 加噪后会重新按 `TOA` 排序，并同步重排 labels。
+
+### Random Pulse Loss
+
+random pulse loss 按概率随机删除单个脉冲：
+
+```text
+--pulse-loss-rate
+```
+
+它和 signal sparsity 不同：
+
+- signal sparsity 删除连续时间区间内的脉冲，形成周期性可见/不可见片段。
+- random pulse loss 随机删除独立脉冲，不保证形成连续缺失区间。
+
+### Spurious Pulses
+
+spurious pulses 用于插入虚假脉冲：
+
+```text
+--spurious-rate
+```
+
+当前实现会按当前脉冲数量的一定比例插入虚假脉冲。虚假脉冲的 `TOA` 在当前观测时间范围内均匀采样，`PW/RF/DOA` 在当前 PDW 全局范围内均匀采样。插入后会重新按 `TOA` 排序并同步 labels。
+
+spurious class 标签设计：
+
+```text
+DTOA input:
+  radar labels: 0, 1, 2, 3
+  spurious label: 4
+
+Binary input:
+  background label: 0
+  radar labels: 1, 2, 3, 4
+  spurious label: 5
+```
+
+因此类别数为：
+
+```text
+DTOA without spurious: 4
+DTOA with spurious:    5
+Binary without spurious: 5
+Binary with spurious:    6
+```
+
+nonideal smoke tests：
+
+```bash
+python train.py --input-format dtoa --loss focal --epochs 2 --toa-error-std 2.0
+python train.py --input-format dtoa --loss focal --epochs 2 --pulse-loss-rate 0.10
+python train.py --input-format dtoa --loss focal --epochs 2 --spurious-rate 0.10
+
+python train.py --input-format binary --loss focal --epochs 2 --toa-error-std 2.0
+python train.py --input-format binary --loss focal --epochs 2 --pulse-loss-rate 0.10
+python train.py --input-format binary --loss focal --epochs 2 --spurious-rate 0.10
+```
+
+原始无 nonideal 条件命令仍然可运行：
+
+```bash
+python train.py --input-format dtoa --loss focal --epochs 2
+python train.py --input-format binary --loss focal --epochs 2
+```
+
+当前限制：
+
+- measurement error 只使用独立高斯噪声。
+- random pulse loss 只使用统一删除概率。
+- spurious pulses 只从全局 PDW 范围均匀采样。
+- spurious pulses 暂未模拟更复杂的物理来源或干扰机制。
+
+## 项目结构
+
+```text
+TCAN/
+  README.md
+  AGENTS.md
+  train.py
+  src/
+    data_simulator.py
+    losses.py
+    nonideal.py
+    preprocessing.py
+    sparsity.py
+    model_tcan.py
+    metrics.py
+    utils.py
+```
+
+各文件作用：
+
+- `train.py`
+  - 主训练入口。
+  - 负责生成数据、划分训练集和测试集、预处理、构造窗口、训练模型、评估结果。
+
+- `src/data_simulator.py`
+  - 生成四类传统雷达源的仿真 PDW 数据。
+  - 每个脉冲输出 `TOA, PW, RF, DOA, label`。
+  - 将不同雷达源的脉冲合并，并按 `TOA` 排序。
+
+- `src/preprocessing.py`
+  - 将 `TOA` 转换为 `DTOA`。
+  - 构造输入特征 `[DTOA, PW, RF, DOA]`。
+  - 构造 binary input 特征 `[binary_presence, PW, RF, DOA]`。
+  - 执行 min-max 归一化。
+  - 生成固定长度序列窗口。
+
+- `src/sparsity.py`
+  - 在原始 PDW 层面应用周期性可见/不可见 scan gate。
+  - 用于模拟 signal sparsity，而不是随机脉冲丢失。
+
+- `src/nonideal.py`
+  - 在原始 PDW 层面模拟 measurement error、random pulse loss 和 spurious pulses。
+  - 所有 nonideal conditions 都发生在 DTOA/binary preprocessing 之前。
+
+- `src/losses.py`
+  - 实现 cross entropy 与 focal loss 的统一构造入口。
+  - 支持 focal loss 的 `gamma` 和 `inverse_freq` alpha。
+
+- `src/model_tcan.py`
+  - 实现 TCAN 模型。
+  - 包含 TCN residual block、dilated causal convolution、weight normalization、ReLU、dropout、residual connection、1x1 channel matching、自注意力模块和最终分类层。
+
+- `src/metrics.py`
+  - 计算 confusion matrix。
+  - 计算每类 recall。
+  - 计算 average recall。
+
+- `src/utils.py`
+  - 设置随机种子。
+  - 自动选择 CPU 或 GPU。
+
+## 数据格式
+
+仿真生成的 PDW 数据包含 5 个字段：
+
+```text
+[TOA, PW, RF, DOA, label]
+```
+
+其中：
+
+- `TOA`：time of arrival，到达时间。
+- `PW`：pulse width，脉冲宽度。
+- `RF`：radio frequency，射频。
+- `DOA`：direction of arrival，到达角。
+- `label`：雷达源类别标签，取值为 `0, 1, 2, 3`。
+
+多个雷达源生成后会被合并为一个 interleaved pulse stream，并按照 `TOA` 升序排序。
+
+## DTOA 预处理
+
+对于按 `TOA` 排序后的脉冲流，DTOA 定义为：
+
+```text
+DTOA_i = TOA_i - TOA_{i-1}
+```
+
+第一个脉冲没有前一个脉冲，因此设为：
+
+```text
+DTOA_0 = 0
+```
+
+模型最终使用的每个脉冲输入特征为：
+
+```text
+[DTOA, PW, RF, DOA]
+```
+
+即输入维度 `D = 4`。
+
+每个特征维度使用 min-max 归一化：
+
+```text
+x_norm = (x - x_min) / (x_max - x_min + 1e-8)
+```
+
+## Tensor Shape
+
+本项目是逐脉冲序列标注任务。
+
+输入 tensor shape：
+
+```text
+[B, T, D]
+```
+
+其中：
+
+- `B`：batch size 或窗口数量。
+- `T`：序列长度。
+- `D`：输入特征维度，当前为 `4`。
+
+标签 tensor shape：
+
+```text
+[B, T]
+```
+
+模型输出 logits shape：
+
+```text
+[B, T, C]
+```
+
+其中：
+
+- `C`：类别数。DTOA input 下为 `4`；binary input 下因为包含 background class，所以为 `5`。
+
+这意味着模型会对每一个脉冲位置输出一个类别预测，而不是只对整条序列输出一个类别。
+
+## 损失函数
+
+当前版本使用标准 PyTorch `CrossEntropyLoss`。
+
+训练时将 logits 和 labels reshape 为：
+
+```text
+logits: [B, T, C] -> [B*T, C]
+labels: [B, T]    -> [B*T]
+```
+
+然后在所有脉冲位置上计算交叉熵损失。
+
+当前版本支持 `CrossEntropyLoss` 和 focal loss，可通过 `--loss ce` 或 `--loss focal` 选择。
+
+## 运行方式
+
+请先确保环境中已安装：
+
+- Python
+- NumPy
+- PyTorch
+
+然后在项目根目录运行 DTOA input：
+
+```bash
+python train.py --input-format dtoa --epochs 2
+```
+
+运行 binary input：
+
+```bash
+python train.py --input-format binary --epochs 2 --ts 10.0
+```
+
+运行 focal loss：
+
+```bash
+python train.py --input-format dtoa --loss focal --epochs 2
+python train.py --input-format binary --loss focal --epochs 2
+```
+
+运行 signal sparsity：
+
+```bash
+python train.py --input-format dtoa --loss focal --sparsity-ratio 1:3 --epochs 2
+python train.py --input-format binary --loss focal --sparsity-ratio 1:3 --epochs 2
+```
+
+脚本会自动选择运行设备：
+
+```python
+device = "cuda" if torch.cuda.is_available() else "cpu"
+```
+
+如果当前默认 Python 环境没有安装 PyTorch，可以切换到已安装 PyTorch 的环境后再运行。例如本机可使用：
+
+```powershell
+D:\Anaconda3\envs\pytorch\python.exe train.py --input-format dtoa --epochs 2
+```
+
+训练脚本当前支持的主要参数：
+
+```text
+--input-format dtoa 或 binary
+--ts          binary time bin 的采样间隔
+--window-size 固定序列窗口长度
+--batch-size  batch size
+--epochs      训练轮数
+--loss        ce 或 focal
+--gamma       focal loss 的 focusing strength
+--alpha-mode  none 或 inverse_freq
+--sparsity-ratio none、1:3、1:5 或 1:8
+--visible-duration 每个可见扫描段的持续时间
+--sparsity-phase-offset signal sparsity 的相位偏移
+--toa-error-std TOA 高斯测量误差标准差
+--pw-error-std  PW 高斯测量误差标准差
+--rf-error-std  RF 高斯测量误差标准差
+--doa-error-std DOA 高斯测量误差标准差
+--pulse-loss-rate 随机脉冲丢失概率
+--spurious-rate 虚假脉冲插入比例
+```
+
+## 仿真数据可视化
+
+为了检查 Phase 1 中四类传统雷达源的脉冲仿真、混合脉冲流和 DTOA 预处理结果，可以运行独立可视化脚本：
+
+```bash
+python visualize_simulation.py
+```
+
+该脚本不会训练模型，也不会影响 `train.py` 的最小训练闭环。它会自动生成一小段仿真数据，并将图片保存到：
+
+```text
+outputs/figures/
+```
+
+当前会生成以下基础图：
+
+- `emitter_fixed_pri.png`：固定 PRI 雷达的 `TOA-DTOA/PRI` 图，用于观察等间隔脉冲。
+- `emitter_jitter_pri.png`：抖动 PRI 雷达的 `TOA-DTOA/PRI` 图，用于观察 PRI 围绕基准值抖动。
+- `emitter_stagger_pri.png`：参差 PRI 雷达的 `TOA-DTOA/PRI` 图，用于观察周期性 PRI 轮换。
+- `emitter_dwell_switch_pri.png`：驻留与切换 PRI 雷达的 `TOA-DTOA/PRI` 图，用于观察分段 PRI 切换。
+- `true_pri_by_emitter.png`：按真实 `label` 分组后，对每个 emitter 内部的 TOA 单独排序并计算 same-emitter interval。这张图展示单个雷达源自己的真实 PRI 模式。
+- `interleaved_label_vs_toa.png`：四个雷达源混合并按 TOA 排序后的 `TOA-label` 散点图，用于观察 interleaved pulse stream 的真实类别分布。
+- `mixed_stream_adjacent_dtoa.png`：混合脉冲流按 TOA 排序后的相邻脉冲 DTOA。该 DTOA 是模型输入中的 DTOA 形式，但相邻两个脉冲可能来自不同雷达，因此它不是单个雷达源的真实 PRI，也不应当当作论文 Fig. 6(a) 的复现图。
+- `dtoa_sequence.png`：混合脉冲流的 DTOA 随 pulse index 的变化。
+- `dtoa_histogram.png`：混合脉冲流 DTOA 的统计直方图。
+
+运行可视化脚本时，终端还会打印每个 `label` 的：
+
+- pulse count
+- min TOA
+- max TOA
+- mean same-emitter interval
+
+这些统计量用于检查不同雷达源的观测时间是否大致对齐，避免某个雷达源在观测后半段单独存在，从而造成混合 DTOA 图右侧出现不合理的平台或尾部结构。
+
+## 运行后会看到什么
+
+运行 `train.py` 后会打印：
+
+```text
+Using device: cuda
+Selected input format: dtoa
+Selected loss function: ce
+Selected sparsity ratio: none
+Visible duration: ...
+Measurement error stds: ...
+Pulse loss rate: ...
+Spurious pulse rate: ...
+PDW columns: ('TOA', 'PW', 'RF', 'DOA', 'label')
+Pulse count before sparsity: ...
+Pulse count after sparsity: ...
+Retained pulse ratio: ...
+Pulse count before nonideal conditions: ...
+Pulse count after measurement error: ...
+Pulse count after pulse loss: ...
+Pulse count after spurious insertion: ...
+Total pulses: ...
+Train input tensor shape [B, T, D]: ...
+Train label tensor shape [B, T]: ...
+Test input tensor shape [B, T, D]: ...
+Test label tensor shape [B, T]: ...
+Number of classes: ...
+Train class counts: ...
+Model output tensor shape [B, T, C]: ...
+Epoch ...
+Evaluation class counts: ...
+Recall per class:
+Average recall:
+Confusion matrix:
+```
+
+其中最重要的是确认：
+
+- 输入是 `[B, T, D]`
+- 标签是 `[B, T]`
+- 输出是 `[B, T, C]`
+- 损失函数覆盖所有 `B*T` 个脉冲位置
+- 评估结果按逐脉冲预测计算
+
+## 与论文完整实验的差异
+
+当前版本是最小复现 pipeline，与论文完整实验相比仍有明显简化：
+
+- 雷达参数是简化设置，并不声明与论文参数完全一致。
+- 只实现四类传统雷达源，没有实现 MFR 场景。
+- 当前支持 DTOA input 和基础 binary input，但 binary input 仍采用简单 time-bin 离散化策略。
+- 当前支持 cross entropy loss 和 focal loss。
+- 当前支持基础 signal sparsity，但所有 emitter 暂时共用同一个 scan gate。
+- 当前支持基础 nonideal receiving conditions：measurement error、random pulse loss 和 spurious pulses。
+- 没有实现 CDIF、SDIF、PRI Transform 等对比方法。
+- 没有进行论文级多场景、多噪声、多密度实验。
+- 没有生成完整对比图表。
+
+## 下一阶段建议
+
+下一阶段可以在当前代码基础上继续扩展：
+
+1. 对照论文补充更完整的数据仿真参数。
+2. 改进 binary input 的 time-bin 碰撞处理策略。
+3. 扩展 focal loss 的 manual alpha 配置和更系统的类别不均衡实验。
+4. 为不同 emitter 设置不同 scan gate、扫描周期或相位。
+5. 增加 MFR 雷达仿真。
+6. 加入 CDIF、SDIF、PRI Transform 等传统方法作为对比。
+7. 增加多组实验配置，例如不同脉冲密度、不同抖动强度、不同丢失率和噪声水平。
+7. 输出更完整的实验表格和图形。
+
+## 注意事项
+
+当前代码的目标是保证 Phase 1 正确、清晰、可运行。后续扩展时应继续保持数据和标签严格对齐，尤其要避免窗口切分后出现输入脉冲和标签错位的问题。
