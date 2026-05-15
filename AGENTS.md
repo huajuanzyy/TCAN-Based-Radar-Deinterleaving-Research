@@ -4,103 +4,158 @@
 
 This repository targets radar pulse deinterleaving under an unknown number of emitters.
 
-The long-term target pipeline is:
+The current technical route is:
 
-TSRD pulse train
+TSRD pulse trains
 -> pulse windows
--> pulse-level embeddings
+-> TCAN triplet embeddings
 -> non-parametric clustering
+-> cluster post-processing
 -> source-count estimation
 -> clustering metrics
--> post-processing and sequence reconstruction
 
 ## Current branch
 
-feat/embedding-evaluation
+feat/cluster-postprocessing
 
 ## Current objective
 
-Implement Phase 2C: systematic embedding evaluation and clustering comparison.
+Implement Phase 3B: cluster post-processing and sequence reconstruction.
 
 Previous phases have implemented:
 
 - TSRD loader
 - TSRD windowing
 - raw-feature clustering baseline
-- TCAN encoder embedding extraction
-- triplet metric learning for TCAN embeddings
+- TCAN embedding extraction
+- triplet metric learning
+- unified embedding evaluation
+- multi-file clustering parameter search
 
-This branch should compare raw features, randomly initialized TCAN embeddings, and triplet-trained TCAN embeddings under the same windows and clustering metrics.
+This branch should refine initial clustering results by mapping clusters back to the original pulse sequence and applying conservative post-processing.
+
+## Conceptual inspiration
+
+This branch borrows the idea of mapping clustering results back to original pulse indices and iteratively refining deinterleaving results.
+
+Do not implement multi-receiver TDOA mapping.
+
+Do not implement SSC-DBSCAN.
+
+Do not implement multi-receiver TDOA generation.
+
+Instead, adapt the idea to embedding clustering:
+
+embedding cluster
+-> original TOA/PDW pulse indices
+-> cluster diagnostics
+-> boundary reassignment
+-> conservative cluster merging
+-> optional cluster splitting
 
 ## Main task
 
-Create a unified evaluation script that can compare:
+Create a post-processing pipeline for clustering labels.
 
-1. raw-feature clustering
-2. random TCAN embedding clustering
-3. triplet-trained TCAN embedding clustering
-
-using the same TSRD file, same windows, same clustering method, and same metrics.
+The pipeline should compare metrics before and after post-processing.
 
 ## Required files
 
 Create or update:
 
-- run_embedding_evaluation.py
-- src/evaluation_runner.py
-- src/result_writer.py
+- src/cluster_diagnostics.py
+- src/cluster_refinement.py
+- run_cluster_postprocessing.py
 - README.md
 
 Reuse existing:
 
 - src/tsrd_loader.py
 - src/tsrd_window_dataset.py
+- src/model_tcan.py
+- src/embedding_extractor.py
 - src/clustering_baselines.py
 - src/clustering_metrics.py
-- src/embedding_extractor.py
-- src/model_tcan.py
 
-## Evaluation methods
+## Cluster diagnostics
 
-Support method names:
+Implement diagnostic metrics for each cluster:
 
-- raw
-- random_embedding
-- triplet_embedding
+- cluster size
+- embedding centroid
+- embedding compactness
+- nearest cluster distance
+- PW/RF/AOA/PA mean and std
+- DTOA statistics
+- noise ratio if applicable
 
-For raw:
+## Boundary pulse reassignment
 
-Use 4d or 5d raw features directly.
+Implement conservative reassignment for noise points or boundary points.
 
-For random_embedding:
+Only reassign a pulse if:
 
-Use randomly initialized TCAN encoder and print a warning.
+- nearest cluster distance is below a threshold
+- nearest-vs-second-nearest margin is large enough
+- PDW distance is within threshold
+- cluster compactness does not degrade significantly
 
-For triplet_embedding:
+Do not force all noise points to be assigned.
 
-Load a checkpoint from --checkpoint.
+## Cluster merging
 
-## Command-line arguments
+Implement conservative merging of clusters.
 
-run_embedding_evaluation.py should support:
+Merge two clusters only if:
 
---tsrd-path
+- embedding centroid distance is below threshold
+- PDW distribution distance is below threshold
+- merged compactness remains acceptable
+
+## Cluster splitting
+
+Implement optional conservative splitting.
+
+Only attempt splitting for clusters with high internal dispersion.
+
+Use internal DBSCAN/HDBSCAN if available.
+
+If splitting is unstable, leave the cluster unchanged.
+
+## Important rule
+
+Do not use ground-truth labels to make post-processing decisions.
+
+Ground-truth labels may only be used for evaluation metrics.
+
+## Command-line script
+
+Create:
+
+run_cluster_postprocessing.py
+
+Arguments:
+
+--tsrd-path or --tsrd-dir
+--file-glob
+--max-files
+--max-windows-per-file
 --feature-set 4d/5d
 --window-size
 --stride
---max-windows
---cluster-method dbscan/hdbscan/agglomerative_oracle
---methods raw,random_embedding,triplet_embedding
---embedding-dim
 --checkpoint
+--cluster-method dbscan/hdbscan
 --eps
 --min-samples
 --min-cluster-size
+--enable-reassign
+--enable-merge
+--enable-split
 --output-csv optional
 
-## Metrics
+## Output
 
-For each method and each window, compute:
+For each window, print metrics before and after post-processing:
 
 - homogeneity
 - completeness
@@ -109,39 +164,31 @@ For each method and each window, compute:
 - adjusted_mutual_info
 - true_source_count
 - estimated_source_count
-- source_count_error
 - abs_source_count_error
 - noise_ratio
 
-Also print mean metrics grouped by method.
+Also print mean before/after metrics.
 
 ## Constraints
 
-Do not implement post-processing in this branch.
-
-Do not implement cluster merging or splitting.
-
-Do not implement source-count correction.
-
-Do not implement batch-hard triplet mining.
-
-Do not commit outputs, checkpoints, or data files.
+Do not implement multi-receiver TDOA processing.
+Do not implement SSC-DBSCAN.
+Do not implement new metric-learning loss in this branch.
+Do not retrain the encoder in this branch.
+Do not commit outputs, checkpoints, or h5 files.
 
 ## Verification
 
 The following should run:
 
-python run_embedding_evaluation.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,random_embedding
-
-If a checkpoint is available:
-
-python run_embedding_evaluation.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,triplet_embedding --checkpoint <checkpoint_path>
+python run_cluster_postprocessing.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows-per-file 3 --checkpoint <checkpoint_path> --cluster-method dbscan --eps 0.5 --min-samples 5 --enable-reassign --enable-merge
 
 After implementation, report:
 
 1. files modified
-2. compared methods
-3. metric table
-4. output CSV path if used
-5. current limitations
-6. next step toward HDBSCAN tuning or post-processing
+2. diagnostics computed
+3. reassignment rule
+4. merge rule
+5. split rule if implemented
+6. before/after metrics
+7. current limitations
