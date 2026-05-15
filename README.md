@@ -885,3 +885,55 @@ python run_tsrd_embedding_clustering.py --tsrd-path E:\Datasets\TSRD\scan\train_
 ```
 
 embedding clustering 阶段同样会对 TCAN 输出的 embeddings 做 L2 normalize，然后再执行聚类和指标计算。
+
+## Phase 2C: Systematic Embedding Evaluation
+
+Phase 2C 提供统一评估脚本，用同一个 TSRD 文件、同一批 pulse windows、同一种 clustering 方法和同一套指标，对比不同表示方式的分选效果：
+
+```text
+raw: 直接使用 [DTOA, PW, RF, AOA] 或 [DTOA, PW, RF, AOA, PA]
+random_embedding: 使用随机初始化 TCAN encoder 输出 embeddings
+triplet_embedding: 加载 triplet 训练后的 TCAN checkpoint 输出 embeddings
+```
+
+这样可以区分三件事：
+
+```text
+raw feature baseline 本身有多强
+随机 TCAN embedding 管线是否正常
+triplet metric learning 是否改善 embedding clustering
+```
+
+统一评估脚本：
+
+```powershell
+python run_embedding_evaluation.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,random_embedding
+```
+
+如果已经有 triplet checkpoint：
+
+```powershell
+python run_embedding_evaluation.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,triplet_embedding --checkpoint checkpoints\<checkpoint_file>.pt
+```
+
+如果 `--methods` 包含 `random_embedding`，脚本会提示该方法使用未训练 TCAN encoder，指标只用于 sanity check。如果 `--methods` 包含 `triplet_embedding` 但没有提供 `--checkpoint`，脚本会直接给出参数错误。
+
+每个 method 都会打印每个 window 的指标，并按 method 打印均值：
+
+```text
+homogeneity
+completeness
+v_measure
+adjusted_rand_index
+adjusted_mutual_info
+abs_source_count_error
+noise_ratio
+```
+
+如果需要保存结果，可以使用：
+
+```powershell
+--output-csv results\embedding_eval.csv
+```
+
+CSV 会同时包含每个 window 的结果和每个 method 的 mean 行。`results/`、`outputs/`、`checkpoints/` 和数据文件不应提交到 Git。
