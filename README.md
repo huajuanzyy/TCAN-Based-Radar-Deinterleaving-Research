@@ -1118,3 +1118,73 @@ secondary clustering 仍是启发式；
 不使用 true labels 做 refinement；
 不重新训练 TCAN encoder。
 ```
+
+## Phase 4A: Multi-file Train/Validation Evaluation
+
+Phase 4A 回到当前效果最稳定的 random triplet TCAN embedding 路线，不引入 batch-hard triplet、supervised contrastive loss 或新的后处理规则。本阶段的目标是验证 triplet embedding 是否能从训练文件泛化到未参与训练的 TSRD 文件，而不是只在同一个文件上看训练内效果。
+
+只在训练文件上评估容易高估效果：TCAN encoder 可能学到当前 pulse train 的局部分布特征，但 unknown-emitter-count 分选真正需要的是在新文件、新 pulse train 上仍然产生可聚类的 embedding 空间。因此本阶段使用文件级 train/eval split：
+
+```text
+train:
+  scan/train_scan/config_0.h5
+  scan/train_scan/config_1.h5
+  scan/train_scan/config_2.h5
+  scan/train_scan/config_3.h5
+  scan/train_scan/config_4.h5
+
+eval:
+  scan/train_scan/config_5.h5
+  scan/train_scan/config_6.h5
+  scan/train_scan/config_7.h5
+  scan/train_scan/config_8.h5
+  scan/train_scan/config_9.h5
+```
+
+文件列表保存在：
+
+```text
+configs/train_files_scan_small.txt
+configs/eval_files_scan_small.txt
+```
+
+这些列表使用相对路径，训练和评估时用 `--data-root` 指向 TSRD 数据根目录。TSRD label 仍然只在当前 pulse train/window 内有意义；训练时 random triplet sampling 只在同一个 window 内构造 anchor/positive/negative，不会把不同文件里的相同整数 label 当成同一个物理 emitter。
+
+多文件训练 random triplet encoder：
+
+```powershell
+python train_tsrd_triplet.py --data-root E:\Datasets\TSRD --file-list configs/train_files_scan_small.txt --feature-set 5d --window-size 1024 --max-windows-per-file 5 --embedding-dim 64 --epochs 2 --triplet-mining random
+```
+
+单文件训练命令仍然可用：
+
+```powershell
+python train_tsrd_triplet.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 10 --embedding-dim 64 --epochs 2
+```
+
+在 held-out eval files 上比较 raw feature clustering 和 triplet embedding clustering：
+
+```powershell
+python run_embedding_evaluation.py --data-root E:\Datasets\TSRD --file-list configs/eval_files_scan_small.txt --feature-set 5d --window-size 1024 --max-windows-per-file 3 --cluster-method dbscan --methods raw,triplet_embedding --checkpoint checkpoints\<checkpoint_file>.pt
+```
+
+评估脚本会输出三层指标：
+
+```text
+per-window metrics
+per-file mean metrics
+overall mean metrics by method
+```
+
+解释结果时，重点看 held-out files 上 `triplet_embedding` 相比 `raw` 是否提高：
+
+```text
+V-measure
+ARI
+AMI
+homogeneity / completeness
+abs source-count error
+noise ratio
+```
+
+如果 `triplet_embedding` 在 config_5.h5 到 config_9.h5 上仍然优于 `raw`，说明 random triplet TCAN embedding 学到的不只是训练文件内的偶然结构，而是有一定跨文件泛化能力。若提升不稳定，则下一步应优先检查训练文件数量、window 数量、DBSCAN/HDBSCAN 参数和 embedding 维度，而不是先添加新的后处理规则。

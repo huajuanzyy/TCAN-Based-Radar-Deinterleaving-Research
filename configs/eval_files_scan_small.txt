@@ -1,0 +1,5 @@
+scan/train_scan/config_5.h5
+scan/train_scan/config_6.h5
+scan/train_scan/config_7.h5
+scan/train_scan/config_8.h5
+scan/train_scan/config_9.h5

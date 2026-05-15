@@ -15,6 +15,7 @@ from src.tsrd_window_dataset import load_tsrd_windows
 DEFAULT_WINDOW_SIZE = 1024
 DEFAULT_STRIDE = 1024
 DEFAULT_MAX_WINDOWS = 10
+DEFAULT_MAX_WINDOWS_PER_FILE = 10
 DEFAULT_EMBEDDING_DIM = 64
 DEFAULT_EPOCHS = 2
 DEFAULT_BATCH_SIZE = 2
@@ -29,10 +30,31 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Train TCAN encoder embeddings with triplet margin loss."
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--tsrd-path",
-        required=True,
         help="Path to a local TSRD h5/hdf5 file containing one pulse train.",
+    )
+    source.add_argument(
+        "--file-list",
+        help="Text file containing TSRD h5/hdf5 paths, one per line.",
+    )
+    parser.add_argument(
+        "--data-root",
+        default=None,
+        help="Optional root used to resolve relative entries in --file-list.",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="Maximum number of files to load from --file-list.",
+    )
+    parser.add_argument(
+        "--max-windows-per-file",
+        type=int,
+        default=DEFAULT_MAX_WINDOWS_PER_FILE,
+        help="Maximum number of windows loaded from each file in --file-list mode.",
     )
     parser.add_argument(
         "--feature-set",
@@ -99,7 +121,69 @@ def parse_args():
         default=DEFAULT_CHECKPOINT_DIR,
         help="Directory for saving checkpoints.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--triplet-mining",
+        choices=["random"],
+        default="random",
+        help="Triplet mining strategy. Only random triplet mining is supported in this branch.",
+    )
+    args = parser.parse_args()
+    if args.max_files is not None and args.max_files <= 0:
+        parser.error("--max-files must be positive when provided.")
+    if args.max_windows_per_file <= 0:
+        parser.error("--max-windows-per-file must be positive.")
+    return args
+
+
+def _read_file_list(file_list, data_root=None, max_files=None):
+    file_list_path = Path(file_list)
+    if not file_list_path.exists():
+        raise FileNotFoundError(f"File list does not exist: {file_list_path}")
+
+    root = None if data_root is None else Path(data_root)
+    paths = []
+    for line in file_list_path.read_text(encoding="utf-8").splitlines():
+        entry = line.strip()
+        if not entry or entry.startswith("#"):
+            continue
+        path = Path(entry)
+        if not path.is_absolute():
+            path = (root / path) if root is not None else path
+        paths.append(path)
+        if max_files is not None and len(paths) >= max_files:
+            break
+
+    if not paths:
+        raise ValueError(f"No TSRD files found in file list: {file_list_path}")
+    return paths
+
+
+def discover_train_files(args):
+    if args.tsrd_path:
+        return [Path(args.tsrd_path)]
+    return _read_file_list(
+        args.file_list,
+        data_root=args.data_root,
+        max_files=args.max_files,
+    )
+
+
+def load_training_windows(files, args):
+    windows = []
+    max_windows = args.max_windows if args.tsrd_path else args.max_windows_per_file
+    for file_path in files:
+        file_windows = load_tsrd_windows(
+            tsrd_path=file_path,
+            feature_set=args.feature_set,
+            window_size=args.window_size,
+            stride=args.stride,
+            max_windows=max_windows,
+        )
+        for local_index, window in enumerate(file_windows):
+            window.metadata["file_window_index"] = local_index
+        windows.extend(file_windows)
+        print(f"Loaded {len(file_windows)} windows from {file_path}")
+    return windows
 
 
 def save_checkpoint(model, args, input_dim, result):
@@ -118,6 +202,8 @@ def save_checkpoint(model, args, input_dim, result):
             "window_size": args.window_size,
             "stride": args.stride,
             "max_windows": args.max_windows,
+            "max_windows_per_file": args.max_windows_per_file,
+            "train_files": [str(path) for path in getattr(args, "train_files", [])],
             "margin": args.margin,
             "epoch_losses": result.epoch_losses,
             "total_triplets": result.total_triplets,
@@ -135,13 +221,9 @@ def main():
         torch.cuda.manual_seed_all(SEED)
 
     device = resolve_device()
-    windows = load_tsrd_windows(
-        tsrd_path=args.tsrd_path,
-        feature_set=args.feature_set,
-        window_size=args.window_size,
-        stride=args.stride,
-        max_windows=args.max_windows,
-    )
+    train_files = discover_train_files(args)
+    args.train_files = train_files
+    windows = load_training_windows(train_files, args)
     input_dim = int(windows[0].X_window.shape[1])
     dataloader = build_window_dataloader(
         windows,
@@ -155,14 +237,19 @@ def main():
     )
 
     print(f"Using device: {device}")
-    print(f"TSRD path: {args.tsrd_path}")
+    print(f"Training files: {len(train_files)}")
+    for file_path in train_files:
+        print(f"  train_file={file_path}")
     print(f"Feature set: {args.feature_set}")
     print(f"Input dim: {input_dim}")
     print(f"Embedding dim: {args.embedding_dim}")
     print(f"Window size: {args.window_size}")
     print(f"Stride: {args.stride}")
     print(f"Loaded windows: {len(windows)}")
+    if args.file_list:
+        print(f"Max windows per file: {args.max_windows_per_file}")
     print(f"Batch size: {args.batch_size}")
+    print(f"Triplet mining: {args.triplet_mining}")
     print(f"Triplets per window: {args.num_triplets_per_window}")
     print(f"Margin: {args.margin}")
 

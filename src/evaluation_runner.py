@@ -140,7 +140,9 @@ def _window_result(method, window_index, window, y_pred):
     return {
         "row_type": "window",
         "method": method,
+        "source_file": window.metadata.get("source_file", ""),
         "window_index": window_index,
+        "file_window_index": window.metadata.get("file_window_index", ""),
         "start_index": window.metadata["start_index"],
         "end_index": window.metadata["end_index"],
         **metrics,
@@ -154,11 +156,41 @@ def _summary_result(method, method_rows):
     return {
         "row_type": "mean",
         "method": method,
+        "source_file": "",
         "window_index": "",
+        "file_window_index": "",
         "start_index": "",
         "end_index": "",
         **metrics,
     }
+
+
+def summarize_file_metric_rows(window_rows):
+    """Return one mean row per source file and method."""
+    grouped = {}
+    for row in window_rows:
+        key = (row["method"], row.get("source_file", ""))
+        grouped.setdefault(key, []).append(row)
+
+    summary_rows = []
+    for method, source_file in sorted(grouped):
+        rows = grouped[(method, source_file)]
+        metrics = average_metric_dicts(
+            [{key: row[key] for key in METRIC_ORDER} for row in rows]
+        )
+        summary_rows.append(
+            {
+                "row_type": "file_mean",
+                "method": method,
+                "source_file": source_file,
+                "window_index": "",
+                "file_window_index": "",
+                "start_index": "",
+                "end_index": "",
+                **metrics,
+            }
+        )
+    return summary_rows
 
 
 def evaluate_raw(windows, config):
