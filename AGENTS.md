@@ -8,108 +8,99 @@ The long-term target pipeline is:
 
 TSRD pulse train
 -> pulse windows
--> TCAN/Transformer pulse-level embeddings
--> metric learning
+-> pulse-level embeddings
 -> non-parametric clustering
 -> source-count estimation
 -> clustering metrics
+-> post-processing and sequence reconstruction
 
 ## Current branch
 
-feat/triplet-metric-learning
+feat/embedding-evaluation
 
 ## Current objective
 
-Implement Phase 2B: triplet metric learning for TCAN pulse-level embeddings.
+Implement Phase 2C: systematic embedding evaluation and clustering comparison.
 
-Phase 1A TSRD loader has been implemented.
-Phase 1B TSRD windowing and raw-feature clustering baseline has been implemented.
-Phase 2A TCAN encoder embedding extraction has been implemented.
+Previous phases have implemented:
 
-This branch should train the TCAN encoder so that same-emitter pulses are close in embedding space and different-emitter pulses are far apart.
+- TSRD loader
+- TSRD windowing
+- raw-feature clustering baseline
+- TCAN encoder embedding extraction
+- triplet metric learning for TCAN embeddings
+
+This branch should compare raw features, randomly initialized TCAN embeddings, and triplet-trained TCAN embeddings under the same windows and clustering metrics.
 
 ## Main task
 
-Add triplet-loss training for TCAN embeddings.
+Create a unified evaluation script that can compare:
 
-The pipeline should be:
+1. raw-feature clustering
+2. random TCAN embedding clustering
+3. triplet-trained TCAN embedding clustering
 
-TSRD windows
--> TCAN encoder
--> embeddings [B, T, E]
--> triplet sampling within each window
--> triplet loss
--> checkpoint saving
--> embedding clustering evaluation
-
-## Important label rule
-
-TSRD labels are only meaningful within the current pulse train.
-
-Do not assume that label 0 in one file is the same physical emitter as label 0 in another file.
-
-For the first implementation, construct triplets within the same window only.
+using the same TSRD file, same windows, same clustering method, and same metrics.
 
 ## Required files
 
 Create or update:
 
-- src/metric_losses.py
-- src/triplet_sampler.py
-- src/embedding_trainer.py
-- train_tsrd_triplet.py
-- run_tsrd_embedding_clustering.py
+- run_embedding_evaluation.py
+- src/evaluation_runner.py
+- src/result_writer.py
 - README.md
 
-## Triplet loss
+Reuse existing:
 
-Use standard triplet margin loss:
+- src/tsrd_loader.py
+- src/tsrd_window_dataset.py
+- src/clustering_baselines.py
+- src/clustering_metrics.py
+- src/embedding_extractor.py
+- src/model_tcan.py
 
-L = max(0, d(anchor, positive) - d(anchor, negative) + margin)
+## Evaluation methods
 
-Default:
+Support method names:
 
---margin 0.5
+- raw
+- random_embedding
+- triplet_embedding
 
-Support:
+For raw:
 
+Use 4d or 5d raw features directly.
+
+For random_embedding:
+
+Use randomly initialized TCAN encoder and print a warning.
+
+For triplet_embedding:
+
+Load a checkpoint from --checkpoint.
+
+## Command-line arguments
+
+run_embedding_evaluation.py should support:
+
+--tsrd-path
+--feature-set 4d/5d
+--window-size
+--stride
+--max-windows
+--cluster-method dbscan/hdbscan/agglomerative_oracle
+--methods raw,random_embedding,triplet_embedding
 --embedding-dim
---margin
---epochs
---batch-size
---learning-rate
---num-triplets-per-window
---checkpoint-dir
+--checkpoint
+--eps
+--min-samples
+--min-cluster-size
+--output-csv optional
 
-## Triplet sampling
+## Metrics
 
-For each window:
-
-- anchor and positive must have the same label.
-- anchor and negative must have different labels.
-- Skip labels that appear fewer than 2 times in the window.
-- Skip windows that contain fewer than 2 unique labels.
-- Do not sample positives or negatives across different files in this branch.
-
-## Embedding normalization
-
-L2-normalize embeddings before triplet loss and before clustering.
-
-## Checkpoint
-
-Save trained encoder checkpoint to:
-
-checkpoints/
-
-Do not commit checkpoint files to GitHub.
-
-## Evaluation
-
-After training, allow evaluation with:
-
-run_tsrd_embedding_clustering.py --checkpoint <path>
-
-The evaluation should compute:
+For each method and each window, compute:
 
 - homogeneity
 - completeness
@@ -122,27 +113,35 @@ The evaluation should compute:
 - abs_source_count_error
 - noise_ratio
 
+Also print mean metrics grouped by method.
+
 ## Constraints
 
-Do not implement supervised contrastive loss in this branch.
-Do not implement batch-hard mining in this branch unless the simple random triplet version is already complete.
-Do not implement post-processing.
+Do not implement post-processing in this branch.
+
 Do not implement cluster merging or splitting.
-Do not upload datasets, checkpoints, or outputs.
+
+Do not implement source-count correction.
+
+Do not implement batch-hard triplet mining.
+
+Do not commit outputs, checkpoints, or data files.
 
 ## Verification
 
 The following should run:
 
-python train_tsrd_triplet.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 10 --embedding-dim 64 --epochs 2 --num-triplets-per-window 256
+python run_embedding_evaluation.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,random_embedding
 
-python run_tsrd_embedding_clustering.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --checkpoint <checkpoint_path> --method dbscan
+If a checkpoint is available:
+
+python run_embedding_evaluation.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,triplet_embedding --checkpoint <checkpoint_path>
 
 After implementation, report:
 
-1. Files modified
-2. Triplet sampling strategy
-3. Training loss behavior
-4. Checkpoint path
-5. Embedding clustering results before and after training if available
-6. Current limitations
+1. files modified
+2. compared methods
+3. metric table
+4. output CSV path if used
+5. current limitations
+6. next step toward HDBSCAN tuning or post-processing
