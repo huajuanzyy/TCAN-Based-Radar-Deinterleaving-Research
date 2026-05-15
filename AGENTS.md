@@ -6,122 +6,110 @@ This repository targets radar pulse deinterleaving under an unknown number of em
 
 The long-term target pipeline is:
 
-1. Load TSRD pulse trains.
-2. Split pulse trains into fixed-length pulse windows.
-3. Extract pulse-level contextual embeddings using TCAN or Transformer encoder.
-4. Cluster embeddings using DBSCAN, HDBSCAN, or hierarchical clustering.
-5. Estimate emitter count.
-6. Evaluate clustering with V-measure, ARI, AMI, Homogeneity, Completeness, and source-count error.
+TSRD pulse train
+-> pulse windows
+-> TCAN/Transformer pulse-level embeddings
+-> metric learning
+-> non-parametric clustering
+-> source-count estimation
+-> clustering metrics
 
 ## Current branch
 
-feat/tcan-embedding-extraction
+feat/triplet-metric-learning
 
 ## Current objective
 
-Implement Phase 2A: TCAN encoder embedding extraction and embedding clustering scaffold.
+Implement Phase 2B: triplet metric learning for TCAN pulse-level embeddings.
 
-Phase 1A TSRD loader has already been implemented.
+Phase 1A TSRD loader has been implemented.
+Phase 1B TSRD windowing and raw-feature clustering baseline has been implemented.
+Phase 2A TCAN encoder embedding extraction has been implemented.
 
-Phase 1B TSRD windowing and raw-feature clustering baseline has already been implemented.
-
-This branch should not implement triplet loss yet.
-
-This branch should not implement supervised contrastive loss yet.
-
-This branch should not implement post-processing such as cluster merging or splitting.
+This branch should train the TCAN encoder so that same-emitter pulses are close in embedding space and different-emitter pulses are far apart.
 
 ## Main task
 
-Add a TCAN encoder mode that outputs pulse-level embeddings instead of fixed-class logits.
+Add triplet-loss training for TCAN embeddings.
 
-The goal is to connect:
+The pipeline should be:
 
-TSRD window
--> feature construction
+TSRD windows
 -> TCAN encoder
--> pulse embeddings
--> clustering baseline
--> clustering metrics
+-> embeddings [B, T, E]
+-> triplet sampling within each window
+-> triplet loss
+-> checkpoint saving
+-> embedding clustering evaluation
 
-## Required implementation
+## Important label rule
+
+TSRD labels are only meaningful within the current pulse train.
+
+Do not assume that label 0 in one file is the same physical emitter as label 0 in another file.
+
+For the first implementation, construct triplets within the same window only.
+
+## Required files
 
 Create or update:
 
-- src/model_tcan.py
-- src/embedding_extractor.py
+- src/metric_losses.py
+- src/triplet_sampler.py
+- src/embedding_trainer.py
+- train_tsrd_triplet.py
 - run_tsrd_embedding_clustering.py
 - README.md
 
-Reuse existing:
+## Triplet loss
 
-- src/tsrd_loader.py
-- src/tsrd_window_dataset.py
-- src/clustering_baselines.py
-- src/clustering_metrics.py
+Use standard triplet margin loss:
 
-## Embedding output
+L = max(0, d(anchor, positive) - d(anchor, negative) + margin)
 
-The TCAN encoder should accept:
+Default:
 
-X: [B, T, D]
+--margin 0.5
 
-and return:
+Support:
 
-embeddings: [B, T, E]
-
-where:
-
-- B is batch size
-- T is pulse-window length
-- D is input feature dimension
-- E is embedding dimension
-
-The embedding dimension should be configurable, default:
-
---embedding-dim 64
-
-## Important design
-
-Do not remove the existing TCAN classification pipeline.
-
-Add encoder functionality without breaking existing code.
-
-Possible implementation options:
-
-1. Add a `return_embeddings` flag to TCAN forward.
-2. Split TCAN into encoder and classifier head.
-3. Add a wrapper class TCANEncoder.
-
-Choose the cleanest option while preserving backward compatibility.
-
-## Clustering script
-
-Create:
-
-run_tsrd_embedding_clustering.py
-
-Arguments:
-
---tsrd-path
---feature-set 4d/5d
---window-size
---stride
---max-windows
 --embedding-dim
---method dbscan/hdbscan/agglomerative_oracle
---eps
---min-samples
---min-cluster-size
---checkpoint optional
+--margin
+--epochs
+--batch-size
+--learning-rate
+--num-triplets-per-window
+--checkpoint-dir
 
-For this branch, if no checkpoint is provided, allow random initialized embeddings for pipeline testing, but clearly print a warning.
+## Triplet sampling
 
-If a checkpoint is provided, load model weights if compatible.
+For each window:
 
-## Metrics
+- anchor and positive must have the same label.
+- anchor and negative must have different labels.
+- Skip labels that appear fewer than 2 times in the window.
+- Skip windows that contain fewer than 2 unique labels.
+- Do not sample positives or negatives across different files in this branch.
 
-Use existing clustering metrics:
+## Embedding normalization
+
+L2-normalize embeddings before triplet loss and before clustering.
+
+## Checkpoint
+
+Save trained encoder checkpoint to:
+
+checkpoints/
+
+Do not commit checkpoint files to GitHub.
+
+## Evaluation
+
+After training, allow evaluation with:
+
+run_tsrd_embedding_clustering.py --checkpoint <path>
+
+The evaluation should compute:
 
 - homogeneity
 - completeness
@@ -136,44 +124,25 @@ Use existing clustering metrics:
 
 ## Constraints
 
-Do not implement triplet loss in this branch.
-
 Do not implement supervised contrastive loss in this branch.
-
-Do not implement HDBSCAN-specific tuning in this branch.
-
-Do not implement cluster merging/splitting in this branch.
-
-Do not train a deep embedding model in this branch.
-
-Do not commit datasets or outputs.
+Do not implement batch-hard mining in this branch unless the simple random triplet version is already complete.
+Do not implement post-processing.
+Do not implement cluster merging or splitting.
+Do not upload datasets, checkpoints, or outputs.
 
 ## Verification
 
 The following should run:
 
-python run_tsrd_embedding_clustering.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --method dbscan
+python train_tsrd_triplet.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 10 --embedding-dim 64 --epochs 2 --num-triplets-per-window 256
 
-python run_tsrd_embedding_clustering.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --method agglomerative_oracle
-
-Expected result:
-
-- The script loads TSRD windows.
-- The TCAN encoder outputs embeddings with shape [T, E].
-- Clustering runs on embeddings.
-- Clustering metrics are printed.
-
-It is acceptable if metrics are poor when the encoder is randomly initialized. The goal of this branch is pipeline construction, not final performance.
-
-## Git
-
-Do not commit automatically unless asked.
+python run_tsrd_embedding_clustering.py --tsrd-path <local_h5_file> --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --checkpoint <checkpoint_path> --method dbscan
 
 After implementation, report:
 
-1. files modified
-2. how TCAN encoder embeddings are produced
-3. embedding shape
-4. how clustering uses embeddings
-5. smoke test results
-6. next step toward triplet loss or supervised contrastive loss
+1. Files modified
+2. Triplet sampling strategy
+3. Training loss behavior
+4. Checkpoint path
+5. Embedding clustering results before and after training if available
+6. Current limitations
