@@ -937,3 +937,66 @@ noise_ratio
 ```
 
 CSV 会同时包含每个 window 的结果和每个 method 的 mean 行。`results/`、`outputs/`、`checkpoints/` 和数据文件不应提交到 Git。
+
+## Phase 3A: Multi-file Clustering Parameter Search
+
+Phase 3A 用于检查单文件、少窗口上看到的提升是否能在多个 TSRD h5 文件和不同 clustering 参数下保持稳定。单个文件上的高指标可能来自局部场景较简单、窗口选择偶然或参数刚好适配，因此需要多文件、多窗口评估。
+
+当前脚本支持比较：
+
+```text
+raw: 直接使用 DTOA/PDW raw features
+triplet_embedding: 加载 triplet checkpoint 后使用 TCAN embeddings
+```
+
+并支持两类聚类参数搜索：
+
+```text
+DBSCAN: eps x min_samples
+HDBSCAN: min_cluster_size x min_samples
+```
+
+参数含义：
+
+```text
+eps: DBSCAN 中两个点被视为邻域点的距离半径，过小会产生大量噪声，过大容易把不同源合并。
+min_samples: DBSCAN/HDBSCAN 中形成核心密度区域所需的最小样本数，越大越保守。
+min_cluster_size: HDBSCAN 中允许形成稳定 cluster 的最小规模，越大越倾向于忽略小簇。
+```
+
+source-count error 的解释：
+
+```text
+source_count_error = estimated_source_count - true_source_count
+abs_source_count_error = abs(source_count_error)
+```
+
+其中 `estimated_source_count` 不会把 `-1` 噪声点算作 emitter。负数表示低估源数，正数表示聚类过分裂或估出了过多源。
+
+运行 raw feature 的 DBSCAN 参数搜索：
+
+```powershell
+python run_clustering_param_search.py --tsrd-dir E:\Datasets\TSRD\scan\train_scan --file-glob "config_*.h5" --max-files 3 --max-windows-per-file 3 --feature-set 5d --window-size 1024 --representation raw --method dbscan --eps-grid 0.2,0.5,0.8 --min-samples-grid 3,5
+```
+
+运行 triplet embedding 的 DBSCAN 参数搜索：
+
+```powershell
+python run_clustering_param_search.py --tsrd-dir E:\Datasets\TSRD\scan\train_scan --file-glob "config_*.h5" --max-files 3 --max-windows-per-file 3 --feature-set 5d --window-size 1024 --representation triplet_embedding --checkpoint checkpoints\<checkpoint_file>.pt --method dbscan --eps-grid 0.2,0.5,0.8 --min-samples-grid 3,5
+```
+
+如果需要保存每组参数的聚合结果：
+
+```powershell
+--output-csv outputs\param_search.csv
+```
+
+选择 best parameter setting 的规则是：
+
+```text
+1. mean_v_measure 最大
+2. 如果接近，则 mean_abs_source_count_error 更小
+3. 再比较 mean_noise_ratio 更小
+```
+
+当前阶段不做 cluster merging、cluster splitting、source-count correction 或任何 post-processing。
