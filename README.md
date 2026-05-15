@@ -1047,3 +1047,74 @@ After post-processing:
 ```
 
 则会保存每个 window 的 before/after 结果。`outputs/`、`checkpoints/` 和 TSRD 数据文件不应提交到 Git。
+
+## Phase 3C: Source-count-aware Clustering Refinement
+
+Phase 3C 专门处理 source-count underestimation。前一阶段的保守 post-processing 基本不破坏指标，但对 `estimated_source_count` 偏低和 `noise_ratio` 偏高的改善很小。因此这一阶段不继续做简单 merge/reassign，而是增加：
+
+```text
+error diagnosis
+noise subcluster recovery
+conservative split of high-dispersion clusters
+before/after source-count-aware evaluation
+```
+
+普通 boundary reassignment 只能把少量 `-1` 点分配回已有 cluster，通常不能增加 cluster 数，因此无法解决“真实源被整体标为 noise”或“多个真实源被合并到一个大 cluster”的问题。Phase 3C 的两个 refinement 方向分别对应这两类错误：
+
+```text
+noise_subcluster_recovery:
+  只在 noise points 内部做二次 DBSCAN/HDBSCAN。
+  只有稳定、足够大、compactness 足够低、PDW 分布一致的子簇才恢复为新 cluster。
+
+split_dispersion_clusters:
+  只对 size 足够大且 embedding compactness 较高的 cluster 做内部二次聚类。
+  只有能产生多个稳定子簇且拆分后 compactness 改善时才接受。
+```
+
+诊断模块会使用 true labels 输出：
+
+```text
+true-label to cluster contingency table
+cluster to true-label composition table
+noise true-label distribution
+major_error_type: missing_as_noise / over_merged / over_split / mixed / clean
+```
+
+这些 true-label-based 信息只用于 diagnosis 和 evaluation，不能用于 refinement decision。实际 recovery/splitting 只使用 embeddings、PDW features 和初始 cluster labels。
+
+单文件测试：
+
+```powershell
+python run_source_count_refinement.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows-per-file 3 --checkpoint checkpoints\<checkpoint_file>.pt --cluster-method dbscan --eps 0.5 --min-samples 3 --enable-noise-recovery --enable-split
+```
+
+多文件小规模测试：
+
+```powershell
+python run_source_count_refinement.py --tsrd-dir E:\Datasets\TSRD\scan\train_scan --file-glob "config_*.h5" --max-files 3 --max-windows-per-file 3 --feature-set 5d --window-size 1024 --checkpoint checkpoints\<checkpoint_file>.pt --cluster-method dbscan --eps 0.5 --min-samples 3 --enable-noise-recovery --enable-split
+```
+
+常用 refinement 参数：
+
+```text
+--noise-eps
+--noise-min-samples
+--min-recovered-cluster-size
+--recovery-compactness-threshold
+--recovery-pdw-threshold
+--split-eps
+--split-min-samples
+--min-split-cluster-size
+--min-split-subcluster-size
+--split-compactness-threshold
+```
+
+当前限制：
+
+```text
+secondary clustering 仍是启发式；
+阈值尚未系统搜索；
+不做 source-count correction；
+不使用 true labels 做 refinement；
+不重新训练 TCAN encoder。
+```
