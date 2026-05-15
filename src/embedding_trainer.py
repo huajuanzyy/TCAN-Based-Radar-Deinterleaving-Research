@@ -7,7 +7,11 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.clustering_baselines import normalize_window_features
-from src.metric_losses import build_triplet_margin_loss, l2_normalize_embeddings
+from src.metric_losses import (
+    build_triplet_margin_loss,
+    compute_batch_hard_triplet_loss,
+    l2_normalize_embeddings,
+)
 from src.triplet_sampler import sample_triplets_from_batch
 
 
@@ -16,6 +20,7 @@ class TripletTrainingResult:
     epoch_losses: list
     skipped_batches: int
     total_triplets: int
+    total_valid_anchors: int = 0
 
 
 def windows_to_tensors(windows):
@@ -68,14 +73,17 @@ def train_triplet_encoder(
     learning_rate=1e-3,
     margin=0.5,
     num_triplets_per_window=256,
+    triplet_mining="random",
     seed=42,
 ):
-    """Train a TCAN encoder with random in-window triplet sampling."""
+    """Train a TCAN encoder with random or batch-hard triplet mining."""
     if epochs <= 0:
         raise ValueError("epochs must be positive.")
     if learning_rate <= 0:
         raise ValueError("learning_rate must be positive.")
-    if num_triplets_per_window <= 0:
+    if triplet_mining not in {"random", "batch_hard"}:
+        raise ValueError("triplet_mining must be 'random' or 'batch_hard'.")
+    if triplet_mining == "random" and num_triplets_per_window <= 0:
         raise ValueError("num_triplets_per_window must be positive.")
 
     model.to(device)
@@ -86,12 +94,14 @@ def train_triplet_encoder(
     epoch_losses = []
     skipped_batches = 0
     total_triplets = 0
+    total_valid_anchors = 0
 
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
-        epoch_triplets = 0
+        epoch_loss_units = 0
         epoch_skipped_batches = 0
+        epoch_valid_anchors = 0
 
         for features, labels in dataloader:
             features = features.to(device)
@@ -100,42 +110,66 @@ def train_triplet_encoder(
             optimizer.zero_grad()
             embeddings = model.encode(features)
             embeddings = l2_normalize_embeddings(embeddings, dim=-1)
-            gathered = _gather_triplet_embeddings(
-                embeddings=embeddings,
-                labels=labels,
-                num_triplets_per_window=num_triplets_per_window,
-                rng=rng,
-                device=device,
-            )
-            if gathered is None:
-                epoch_skipped_batches += 1
-                continue
+            if triplet_mining == "random":
+                gathered = _gather_triplet_embeddings(
+                    embeddings=embeddings,
+                    labels=labels,
+                    num_triplets_per_window=num_triplets_per_window,
+                    rng=rng,
+                    device=device,
+                )
+                if gathered is None:
+                    epoch_skipped_batches += 1
+                    continue
 
-            anchors, positives, negatives, triplet_count = gathered
-            loss = criterion(anchors, positives, negatives)
+                anchors, positives, negatives, loss_unit_count = gathered
+                loss = criterion(anchors, positives, negatives)
+            else:
+                result = compute_batch_hard_triplet_loss(
+                    embeddings=embeddings,
+                    labels=labels,
+                    margin=margin,
+                )
+                if result.valid_anchor_count == 0:
+                    epoch_skipped_batches += 1
+                    continue
+                loss = result.loss
+                loss_unit_count = result.valid_anchor_count
+                epoch_valid_anchors += result.valid_anchor_count
+
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item() * triplet_count
-            epoch_triplets += triplet_count
+            running_loss += loss.item() * loss_unit_count
+            epoch_loss_units += loss_unit_count
 
-        if epoch_triplets == 0:
+        if epoch_loss_units == 0:
             raise ValueError(
-                "No valid triplets were sampled. Use windows with at least two "
-                "labels and at least one label containing two or more pulses."
+                "No valid triplet anchors were found. Use windows with at least "
+                "two labels and at least one label containing two or more pulses."
             )
 
-        mean_loss = running_loss / float(epoch_triplets)
+        mean_loss = running_loss / float(epoch_loss_units)
         epoch_losses.append(mean_loss)
         skipped_batches += epoch_skipped_batches
-        total_triplets += epoch_triplets
-        print(
-            f"Epoch {epoch:02d}/{epochs} | triplet_loss: {mean_loss:.6f} "
-            f"| triplets: {epoch_triplets} | skipped_batches: {epoch_skipped_batches}"
-        )
+        if triplet_mining == "random":
+            total_triplets += epoch_loss_units
+            print(
+                f"Epoch {epoch:02d}/{epochs} | triplet_loss: {mean_loss:.6f} "
+                f"| triplets: {epoch_loss_units} "
+                f"| skipped_batches: {epoch_skipped_batches}"
+            )
+        else:
+            total_valid_anchors += epoch_valid_anchors
+            print(
+                f"Epoch {epoch:02d}/{epochs} | batch_hard_triplet_loss: {mean_loss:.6f} "
+                f"| valid_anchors: {epoch_valid_anchors} "
+                f"| skipped_batches: {epoch_skipped_batches}"
+            )
 
     return TripletTrainingResult(
         epoch_losses=epoch_losses,
         skipped_batches=skipped_batches,
         total_triplets=total_triplets,
+        total_valid_anchors=total_valid_anchors,
     )

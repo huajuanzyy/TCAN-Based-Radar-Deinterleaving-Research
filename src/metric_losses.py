@@ -3,6 +3,8 @@
 import torch.nn.functional as F
 from torch import nn
 
+from src.batch_hard_triplet import batch_hard_triplet_loss
+
 
 def l2_normalize_embeddings(embeddings, dim=-1, eps=1e-12):
     """L2-normalize embeddings along the embedding dimension."""
@@ -17,3 +19,8 @@ def build_triplet_margin_loss(margin=0.5, p=2):
     if margin <= 0:
         raise ValueError("margin must be positive.")
     return nn.TripletMarginLoss(margin=margin, p=p, reduction="mean")
+
+
+def compute_batch_hard_triplet_loss(embeddings, labels, margin=0.5):
+    """Return batch-hard triplet loss and valid-anchor statistics."""
+    return batch_hard_triplet_loss(embeddings, labels, margin=margin)

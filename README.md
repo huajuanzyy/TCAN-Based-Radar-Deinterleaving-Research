@@ -1118,3 +1118,68 @@ secondary clustering 仍是启发式；
 不使用 true labels 做 refinement；
 不重新训练 TCAN encoder。
 ```
+
+## Phase 4A: Batch-hard Triplet Metric Learning
+
+Phase 4A 不继续增加 clustering 后处理规则，而是回到 TCAN embedding 空间本身。Phase 3C 的 source-count-aware refinement 能提升 V-measure、ARI 和 AMI，但 noise ratio 已经较低而 source-count error 仍然偏高，说明主要问题更可能是多个真实 emitter 在 embedding 空间中被压得太近，导致 DBSCAN/HDBSCAN 形成 over-merged clusters。
+
+Phase 2B 的 random triplet sampling 每次随机选择 positive 和 negative。它能建立基本的“同源近、异源远”结构，但很多随机 triplet 很容易，loss 很快变小，却不一定处理最容易造成聚类合并的边界样本。
+
+Batch-hard triplet mining 在同一个 local label context 内为每个 anchor 选择更有信息量的样本：
+
+```text
+hardest positive:
+  与 anchor 同 label、距离最远的 pulse embedding
+
+hardest negative:
+  与 anchor 不同 label、距离最近的 pulse embedding
+
+loss:
+  max(0, d(anchor, hardest_positive) - d(anchor, hardest_negative) + margin)
+```
+
+这样训练会直接惩罚“同一 emitter 内部太分散”和“不同 emitter 之间太接近”的情况，有助于拉开容易被聚成同一簇的 emitter 边界，从而减少 over-merged clusters。实现仍然不改变聚类阶段，也不使用 true labels 做 clustering/refinement 决策；labels 只在 metric learning 训练中作为监督信号使用。
+
+TSRD label 有一个重要限制：label 只在当前 pulse train/window 内有意义。不同文件或不同 pulse train 中相同整数 label 不能默认视为同一个物理 emitter。因此当前 batch-hard 实现对 `[B, T, E]` embeddings 按 window 独立 mining，不跨 window 混合 label。
+
+训练旧 random triplet 流程：
+
+```powershell
+python train_tsrd_triplet.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 10 --embedding-dim 64 --epochs 2 --triplet-mining random
+```
+
+训练 batch-hard triplet：
+
+```powershell
+python train_tsrd_triplet.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 10 --embedding-dim 64 --epochs 2 --triplet-mining batch_hard
+```
+
+batch-hard 训练日志会打印：
+
+```text
+batch_hard_triplet_loss
+valid_anchors
+skipped_batches
+```
+
+其中 `valid_anchors` 是同时存在同 label positive 和不同 label negative 的 anchor 数量。对于正常的 multi-emitter TSRD window，它通常应接近 `batch_size * window_size`；如果一个 batch 中 window 只有单一 label，或某些 label 只有一个 pulse，则对应 anchor 会被跳过。
+
+评估训练后的 checkpoint：
+
+```powershell
+python run_embedding_evaluation.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --cluster-method dbscan --methods raw,triplet_embedding --checkpoint checkpoints\<batch_hard_checkpoint>.pt
+```
+
+建议用同一组 DBSCAN/HDBSCAN 参数分别评估 random triplet checkpoint 与 batch-hard triplet checkpoint，并比较：
+
+```text
+V-measure
+ARI
+AMI
+homogeneity
+completeness
+abs source-count error
+noise ratio
+```
+
+当前阶段不实现 supervised contrastive loss，不新增后处理规则，不实现 cluster merge/split，也不提交 checkpoint、outputs 或 h5 数据文件。

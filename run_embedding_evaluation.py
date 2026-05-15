@@ -72,7 +72,10 @@ def parse_args():
     parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Triplet-trained TCAN checkpoint required by triplet_embedding.",
+        help=(
+            "Triplet-trained TCAN checkpoint required by triplet_embedding. "
+            "The checkpoint may come from random or batch-hard triplet mining."
+        ),
     )
     parser.add_argument(
         "--eps",

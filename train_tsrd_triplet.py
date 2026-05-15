@@ -22,6 +22,7 @@ DEFAULT_LEARNING_RATE = 1e-3
 DEFAULT_MARGIN = 0.5
 DEFAULT_TRIPLETS_PER_WINDOW = 256
 DEFAULT_CHECKPOINT_DIR = "checkpoints"
+DEFAULT_TRIPLET_MINING = "random"
 SEED = 42
 
 
@@ -95,6 +96,12 @@ def parse_args():
         help="Number of random triplets sampled from each window per epoch.",
     )
     parser.add_argument(
+        "--triplet-mining",
+        choices=["random", "batch_hard"],
+        default=DEFAULT_TRIPLET_MINING,
+        help="Triplet mining strategy. Default preserves random in-window sampling.",
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         default=DEFAULT_CHECKPOINT_DIR,
         help="Directory for saving checkpoints.",
@@ -106,9 +113,16 @@ def save_checkpoint(model, args, input_dim, result):
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    checkpoint_path = checkpoint_dir / (
-        f"tcan_triplet_{args.feature_set}_edim{args.embedding_dim}_{timestamp}.pt"
-    )
+    if args.triplet_mining == "random":
+        checkpoint_name = (
+            f"tcan_triplet_{args.feature_set}_edim{args.embedding_dim}_{timestamp}.pt"
+        )
+    else:
+        checkpoint_name = (
+            f"tcan_batch_hard_triplet_{args.feature_set}_"
+            f"edim{args.embedding_dim}_{timestamp}.pt"
+        )
+    checkpoint_path = checkpoint_dir / checkpoint_name
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -119,8 +133,10 @@ def save_checkpoint(model, args, input_dim, result):
             "stride": args.stride,
             "max_windows": args.max_windows,
             "margin": args.margin,
+            "triplet_mining": args.triplet_mining,
             "epoch_losses": result.epoch_losses,
             "total_triplets": result.total_triplets,
+            "total_valid_anchors": result.total_valid_anchors,
             "args": vars(args),
         },
         checkpoint_path,
@@ -163,7 +179,9 @@ def main():
     print(f"Stride: {args.stride}")
     print(f"Loaded windows: {len(windows)}")
     print(f"Batch size: {args.batch_size}")
-    print(f"Triplets per window: {args.num_triplets_per_window}")
+    print(f"Triplet mining: {args.triplet_mining}")
+    if args.triplet_mining == "random":
+        print(f"Triplets per window: {args.num_triplets_per_window}")
     print(f"Margin: {args.margin}")
 
     result = train_triplet_encoder(
@@ -174,6 +192,7 @@ def main():
         learning_rate=args.learning_rate,
         margin=args.margin,
         num_triplets_per_window=args.num_triplets_per_window,
+        triplet_mining=args.triplet_mining,
         seed=SEED,
     )
     checkpoint_path = save_checkpoint(
