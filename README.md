@@ -1000,3 +1000,50 @@ python run_clustering_param_search.py --tsrd-dir E:\Datasets\TSRD\scan\train_sca
 ```
 
 当前阶段不做 cluster merging、cluster splitting、source-count correction 或任何 post-processing。
+
+## Phase 3B: Cluster Post-processing and Sequence Reconstruction
+
+Phase 3B 在已有 `triplet_embedding + DBSCAN/HDBSCAN` 初始聚类结果基础上，增加保守的 cluster post-processing。目标不是重新训练 encoder，也不是引入新的 clustering 方法，而是把 cluster label 映射回原始 pulse window 后，根据 embedding 与 PDW 统计量做小幅修正，并比较 before/after metrics。
+
+这个阶段只借鉴多接收机 TDOA mapping 文献中的两个思想：
+
+```text
+cluster-to-pulse mapping
+iterative refinement
+```
+
+当前实现不生成 TDOA，不使用多接收机信息，不实现 SSC-DBSCAN。
+
+后处理包含三个部分：
+
+```text
+reassign: 只尝试把 -1 noise points 等边界点重新分配给非常可信的最近 cluster。
+merge: 只合并 embedding centroid 与 PDW 分布都非常接近，且合并后 compactness 不明显变差的簇。
+split: 当前是保守 scaffold，默认不实际拆分；后续可加入内部 DBSCAN/HDBSCAN 和稳定性检查。
+```
+
+后处理决策不使用 ground-truth labels。真实 labels 只用于 before/after evaluation。
+
+运行示例：
+
+```powershell
+python run_cluster_postprocessing.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows-per-file 3 --checkpoint checkpoints\<checkpoint_file>.pt --cluster-method dbscan --eps 0.5 --min-samples 5 --enable-reassign --enable-merge
+```
+
+脚本会对每个 window 打印：
+
+```text
+Before post-processing:
+v_measure, ARI, AMI, homogeneity, completeness, estimated_source_count, abs_source_count_error, noise_ratio
+
+After post-processing:
+同样指标
+```
+
+并输出本窗口被重分配的 pulse index 与被合并的 cluster 对。最后会打印 mean before/after metrics。如果指定：
+
+```powershell
+--output-csv outputs\postprocessing_eval.csv
+```
+
+则会保存每个 window 的 before/after 结果。`outputs/`、`checkpoints/` 和 TSRD 数据文件不应提交到 Git。
