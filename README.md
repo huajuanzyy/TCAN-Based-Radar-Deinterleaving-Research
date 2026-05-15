@@ -832,3 +832,56 @@ python run_tsrd_embedding_clustering.py --tsrd-path E:\Datasets\TSRD\scan\train_
 ```powershell
 --checkpoint path\to\checkpoint.pt
 ```
+
+## Phase 2B: Triplet Metric Learning
+
+Phase 2B 使用 triplet margin loss 训练 TCAN encoder 的 pulse-level embedding 空间。目标是让同一个 emitter 的 pulse embeddings 更近，不同 emitter 的 pulse embeddings 更远。标准 triplet 由三部分组成：
+
+```text
+anchor: 当前参考 pulse
+positive: 与 anchor 来自同一个 label 的 pulse
+negative: 与 anchor 来自不同 label 的 pulse
+```
+
+loss 形式为：
+
+```text
+max(0, d(anchor, positive) - d(anchor, negative) + margin)
+```
+
+这种训练方式适合 unknown-emitter-count deinterleaving，因为模型不需要学习固定类别 ID，而是学习一个可聚类的距离空间。后续在新 pulse train 中，即使 emitter 数量未知，也可以先提取 embeddings，再用 DBSCAN、HDBSCAN 或层次聚类完成分选。
+
+重要限制：TSRD 的 label 只在当前 pulse train 内有意义。不同文件中的相同 label ID 不能默认理解为同一个物理 emitter。因此当前实现只在同一个 window 内构造 triplets，不跨文件、不跨 window 采样 positive。
+
+当前 triplet sampling 是 random sampling：
+
+```text
+anchor 和 positive 来自同一 label
+negative 来自不同 label
+样本数少于 2 的 label 不能作为 anchor-positive 类
+unique labels 少于 2 的 window 会被跳过
+```
+
+尚未实现 batch-hard mining、semi-hard mining 或 supervised contrastive loss。
+
+训练 triplet encoder：
+
+```powershell
+python train_tsrd_triplet.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 10 --embedding-dim 64 --epochs 2 --num-triplets-per-window 256
+```
+
+训练时 embeddings 会先做 L2 normalize，再计算 triplet loss。checkpoint 默认保存到：
+
+```text
+checkpoints/
+```
+
+checkpoint 文件不应提交到 Git。
+
+使用训练后的 checkpoint 做 embedding clustering：
+
+```powershell
+python run_tsrd_embedding_clustering.py --tsrd-path E:\Datasets\TSRD\scan\train_scan\config_0.h5 --feature-set 5d --window-size 1024 --max-windows 3 --embedding-dim 64 --checkpoint checkpoints\<checkpoint_file>.pt --method dbscan
+```
+
+embedding clustering 阶段同样会对 TCAN 输出的 embeddings 做 L2 normalize，然后再执行聚类和指标计算。

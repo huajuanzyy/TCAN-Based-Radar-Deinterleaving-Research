@@ -2,6 +2,7 @@
 
 import argparse
 
+import numpy as np
 import torch
 
 from src.clustering_baselines import normalize_window_features, run_clustering_method
@@ -115,6 +116,11 @@ def print_metrics(prefix, metrics):
     print(f"{prefix} | {metric_text}")
 
 
+def l2_normalize_numpy(features, axis=-1, eps=1e-12):
+    norms = np.linalg.norm(features, ord=2, axis=axis, keepdims=True)
+    return features / np.maximum(norms, eps)
+
+
 def state_dict_from_checkpoint(checkpoint):
     if isinstance(checkpoint, dict):
         for key in ("model_state_dict", "state_dict", "model"):
@@ -124,7 +130,14 @@ def state_dict_from_checkpoint(checkpoint):
 
 
 def load_compatible_checkpoint(model, checkpoint_path, device):
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    try:
+        checkpoint = torch.load(
+            checkpoint_path,
+            map_location=device,
+            weights_only=False,
+        )
+    except TypeError:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = state_dict_from_checkpoint(checkpoint)
     if not isinstance(state_dict, dict):
         raise ValueError(f"Checkpoint '{checkpoint_path}' does not contain a state dict.")
@@ -204,7 +217,7 @@ def main():
     for window_index, window in enumerate(windows):
         X_scaled = normalize_window_features(window.X_window)
         embeddings = extract_window_embeddings(model, X_scaled, device=device)
-        embedding_features = normalize_window_features(embeddings)
+        embedding_features = l2_normalize_numpy(embeddings).astype(np.float32)
         print(f"window={window_index} embeddings shape: {embeddings.shape}")
 
         y_pred = run_clustering_method(
